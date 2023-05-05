@@ -107,7 +107,7 @@ async fn handle_tcp_stream(stream: TcpStream, router: Arc<Router<ConnectionPool<
         r = memcached::read_command(&mut r) => match r {
             Ok(Some(b)) => {
                 // println!("{}", l);
-                let command = memcached::parse_text_command(&b[..]);
+                let command = memcached::decode_text_command(&b[..]);
                 println!("{:?}", command);
             },
             Ok(None) => break,
