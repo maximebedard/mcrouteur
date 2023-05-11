@@ -7,7 +7,7 @@ use tokio::{
 };
 use url::Url;
 
-use kvp::{memcached, ConnectionPool, Router};
+use kvp::{memcached, spawn_manager, ConnectionPool, ConnectionPoolBuilder, Router};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -39,8 +39,8 @@ async fn main() -> io::Result<()> {
     .collect::<Vec<_>>();
 
   println!("{:?}", upstream_urls);
-
-  let connection_pool = ConnectionPool::default();
+  let manager = spawn_manager().await;
+  let connection_pool = ConnectionPoolBuilder::new(manager, 1).build();
 
   let mut router = Router::default();
 
