@@ -90,7 +90,7 @@ impl<C> ConnectionPoolManager<C> {
   }
 
   async fn reconnect(&self, connection: C) -> io::Result<C> {
-    self.disconnect(connection).await;
+    self.disconnect(connection).await?;
     self.connect().await
   }
 }
@@ -101,13 +101,15 @@ pub async fn spawn_manager() -> ConnectionPoolManager<memcached::Connection> {
     tokio::task::spawn(async move {
       match evt {
         ConnectionPoolManagerEvent::Connect { sender } => {
-          sender.send(Ok(memcached::Connection)).ok();
+          sender
+            .send(Ok(memcached::Connection::connect("".parse().unwrap()).await.unwrap()))
+            .ok();
         }
         ConnectionPoolManagerEvent::Disconnect { connection: _, sender } => {
           sender.send(Ok(())).ok();
         }
         ConnectionPoolManagerEvent::Ping { mut connection, sender } => {
-          let is_ok = connection.ping().await.is_ok();
+          // let is_ok = connection.ping().await.is_ok();
           sender.send(Ok(connection)).ok();
         }
       }

@@ -1,125 +1,484 @@
-use std::{collections::VecDeque, io};
+use std::{
+  borrow::Cow,
+  collections::BTreeMap,
+  io,
+  net::{SocketAddrV4, SocketAddrV6},
+  time::Duration,
+};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::{
-  io::{AsyncBufRead, AsyncBufReadExt},
+  io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufStream},
+  net::{self, TcpStream},
   sync::mpsc,
+  time::Instant,
 };
 use url::Url;
 
 #[derive(Debug)]
-pub struct Connection;
+enum Protocol {
+  Binary,
+  Text,
+}
+
+#[derive(Debug)]
+pub struct Connection {
+  stream: BufStream<TcpStream>,
+  protocol: Protocol,
+}
 
 impl Connection {
-  pub async fn connect(_url: Url) -> io::Result<Self> {
-    todo!()
+  pub async fn connect(url: Url) -> io::Result<Self> {
+    assert_eq!("tcp", url.scheme()); // only support tcp for now
+
+    let port = url.port().unwrap_or(11211);
+    let params = url.query_pairs().collect::<BTreeMap<_, _>>();
+    let protocol = match params.get("protocol").map(|v| v.as_ref()) {
+      Some("text") => Ok(Protocol::Text),
+      Some("binary") | None => Ok(Protocol::Binary),
+      Some(invalid) => Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("protocol '{invalid}' is invalid"),
+      )),
+    }?;
+
+    let addr = match url.host() {
+      Some(url::Host::Domain(domain)) => net::lookup_host(format!("{}:{}", domain, port))
+        .await
+        .and_then(|mut v| {
+          v.next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::ConnectionReset, "unable to find host"))
+        })?,
+      Some(url::Host::Ipv4(ip)) => SocketAddrV4::new(ip, port).into(),
+      Some(url::Host::Ipv6(ip)) => SocketAddrV6::new(ip, port, 0, 0).into(),
+      None => format!("[::]:{port}").parse().unwrap(),
+    };
+
+    let stream = TcpStream::connect(addr).await?;
+    let stream = BufStream::new(stream);
+
+    Ok(Self { stream, protocol })
   }
 
-  pub async fn close(&mut self) -> io::Result<()> {
-    todo!()
+  pub async fn close(mut self) -> io::Result<()> {
+    self.stream.shutdown().await
   }
 
-  pub async fn ping(&mut self) -> io::Result<()> {
-    todo!()
+  pub async fn get(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Get(KeyCommandRef { key: k.into() }))
+      .await?;
+    Ok(())
   }
 
-  pub async fn get(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    todo!()
+  pub async fn getq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::GetQ(KeyCommandRef { key: k.into() }))
+      .await?;
+    Ok(())
   }
 
-  pub async fn set(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
-    todo!()
+  pub async fn getk(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::GetK(KeyCommandRef { key: k.into() }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn getkq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::GetKQ(KeyCommandRef { key: k.into() }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn gat(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::GetAndTouch(TouchCommandRef { key: k.into(), exptime }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn gatq(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::GetAndTouchQ(TouchCommandRef { key: k.into(), exptime }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn set(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Set(SetCommandRef {
+        key: k.into(),
+        value: v.into(),
+        exptime: 0,
+        flags: 0,
+        cas: None,
+      }))
+      .await
+  }
+
+  pub async fn setq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::SetQ(SetCommandRef {
+        key: k.into(),
+        value: v.into(),
+        exptime: 0,
+        flags: 0,
+        cas: None,
+      }))
+      .await
+  }
+
+  pub async fn add(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Add(SetCommandRef {
+        key: k.into(),
+        value: v.into(),
+        exptime: 0,
+        flags: 0,
+        cas: None,
+      }))
+      .await
+  }
+
+  pub async fn addq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::AddQ(SetCommandRef {
+        key: k.into(),
+        value: v.into(),
+        exptime: 0,
+        flags: 0,
+        cas: None,
+      }))
+      .await
+  }
+
+  pub async fn replace(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Replace(SetCommandRef {
+        key: k.into(),
+        value: v.into(),
+        exptime: 0,
+        flags: 0,
+        cas: None,
+      }))
+      .await
+  }
+
+  pub async fn replaceq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::ReplaceQ(SetCommandRef {
+        key: k.into(),
+        value: v.into(),
+        exptime: 0,
+        flags: 0,
+        cas: None,
+      }))
+      .await
+  }
+
+  pub async fn append(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Append(AppendPrependCommandRef {
+        key: k.into(),
+        value: v.into(),
+      }))
+      .await
+  }
+
+  pub async fn appendq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::AppendQ(AppendPrependCommandRef {
+        key: k.into(),
+        value: v.into(),
+      }))
+      .await
+  }
+
+  pub async fn prepend(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Prepend(AppendPrependCommandRef {
+        key: k.into(),
+        value: v.into(),
+      }))
+      .await
+  }
+
+  pub async fn prependq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::PrependQ(AppendPrependCommandRef {
+        key: k.into(),
+        value: v.into(),
+      }))
+      .await
+  }
+
+  pub async fn delete(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Delete(KeyCommandRef { key: k.into() }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn deleteq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::DeleteQ(KeyCommandRef { key: k.into() }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn incr(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Incr(IncrDecrCommandRef {
+        key: k.into(),
+        delta: 1,
+        init: 0,
+        exptime: 0,
+      }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn incrq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::IncrQ(IncrDecrCommandRef {
+        key: k.into(),
+        delta: 1,
+        init: 0,
+        exptime: 0,
+      }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn decr(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Decr(IncrDecrCommandRef {
+        key: k.into(),
+        delta: 1,
+        init: 0,
+        exptime: 0,
+      }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn decrq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::DecrQ(IncrDecrCommandRef {
+        key: k.into(),
+        delta: 1,
+        init: 0,
+        exptime: 0,
+      }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn touch(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::Touch(TouchCommandRef { key: k.into(), exptime }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn touchq(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+    self
+      .write_command(&CommandRef::TouchQ(TouchCommandRef { key: k.into(), exptime }))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn flush(&mut self) -> io::Result<()> {
+    self.write_command(&CommandRef::Flush).await?;
+    Ok(())
+  }
+
+  pub async fn flushq(&mut self) -> io::Result<()> {
+    self.write_command(&CommandRef::FlushQ).await?;
+    Ok(())
+  }
+
+  pub async fn version(&mut self) -> io::Result<()> {
+    self.write_command(&CommandRef::Version).await?;
+    Ok(())
+  }
+
+  pub async fn stats(&mut self) -> io::Result<()> {
+    self.write_command(&CommandRef::Stats).await?;
+    Ok(())
+  }
+
+  pub async fn quit(&mut self) -> io::Result<()> {
+    self.write_command(&CommandRef::Quit).await?;
+    Ok(())
+  }
+
+  pub async fn quitq(&mut self) -> io::Result<()> {
+    self.write_command(&CommandRef::QuitQ).await?;
+    Ok(())
+  }
+
+  pub async fn noop(&mut self) -> io::Result<()> {
+    self.write_command(&CommandRef::Noop).await?;
+    Ok(())
+  }
+
+  async fn write_command(&mut self, command: &CommandRef<'_>) -> io::Result<()> {
+    let buffer = match self.protocol {
+      Protocol::Binary => encode_binary_command(command),
+      Protocol::Text => encode_text_command(command),
+    };
+    let buffer = buffer.map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Failed to encode command"))?;
+    self.stream.write(buffer.as_slice()).await?;
+    self.stream.flush().await?;
+    Ok(())
+  }
+
+  async fn read_response(&mut self) -> io::Result<()> {
+    match self.protocol {
+      Protocol::Text => Ok(()),
+      Protocol::Binary => todo!(),
+    }
   }
 }
 
-struct Command2;
-
-fn spawn_connection(queue_size: usize, url: Url) -> mpsc::Sender<Command2> {
-  let (sender, mut receiver) = mpsc::channel(queue_size);
+fn spawn_connection(max_idle: Duration, max_lifetime: Duration, url: Url) -> mpsc::Sender<Command> {
+  let (sender, mut receiver) = mpsc::channel(1);
   tokio::task::spawn(async move {
-    let mut connection = Connection::connect(url).await.unwrap();
-    while let Some(msg) = receiver.recv().await {}
-    connection.close().await.unwrap();
-  });
-  sender
-}
+    loop {
+      match receiver.recv().await {
+        Some(msg) => {
+          let mut connection = Connection::connect(url.clone()).await.unwrap();
+          process_msg(&mut connection, msg).await;
 
-fn spawn_pool(size: usize, queue_size: usize, connection_queue_size: usize, url: Url) -> mpsc::Sender<Command2> {
-  let (sender, mut receiver) = mpsc::channel(queue_size);
+          let idle_deadline = tokio::time::sleep(max_idle);
+          tokio::pin!(idle_deadline);
 
-  tokio::task::spawn(async move {
-    let connections = (0..size)
-      .map(|_i| spawn_connection(connection_queue_size, url.clone()))
-      .collect::<Vec<_>>();
+          let lifetime_deadline = tokio::time::sleep(max_lifetime);
+          tokio::pin!(lifetime_deadline);
 
-    let mut i = 0;
-    while let Some(msg) = receiver.recv().await {
-      connections[i].send(msg).await;
+          loop {
+            tokio::select! {
+              _ = &mut idle_deadline => break,
+              _ = &mut lifetime_deadline => break,
+              msg = receiver.recv() => {
+                idle_deadline.as_mut().reset(Instant::now() + max_idle);
+
+                match msg {
+                  None => break,
+                  Some(msg) => process_msg(&mut connection, msg).await,
+                }
+              }
+            }
+          }
+
+          connection.close().await.ok();
+        }
+        None => break,
+      }
     }
   });
   sender
 }
 
+async fn process_msg(conn: &mut Connection, msg: Command) {}
+
 #[derive(Debug, PartialEq)]
-pub struct KeyCommand<'a> {
-  key: &'a str,
+pub struct KeyCommandRef<'a> {
+  key: Cow<'a, str>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct TouchCommand<'a> {
-  key: &'a str,
+pub struct KeyCommand {
+  key: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct TouchCommandRef<'a> {
+  key: Cow<'a, str>,
   exptime: u32,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct SetCommand<'a> {
-  key: &'a str,
-  value: &'a [u8],
+pub struct TouchCommand {
+  key: String,
+  exptime: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct SetCommandRef<'a> {
+  key: Cow<'a, str>,
+  value: Cow<'a, [u8]>,
   flags: u32,
   exptime: u32,
   cas: Option<u64>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct IncrDecrCommand<'a> {
-  key: &'a str,
+pub struct SetCommand {
+  key: String,
+  value: Vec<u8>,
+  flags: u32,
+  exptime: u32,
+  cas: Option<u64>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct IncrDecrCommandRef<'a> {
+  key: Cow<'a, str>,
   delta: u64,
   init: u64,
   exptime: u32,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct AppendPrependCommand<'a> {
-  key: &'a str,
-  value: &'a [u8],
+pub struct IncrDecrCommand {
+  key: String,
+  delta: u64,
+  init: u64,
+  exptime: u32,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Command<'a> {
-  Get(KeyCommand<'a>),
-  GetQ(KeyCommand<'a>),
-  GetK(KeyCommand<'a>),
-  GetKQ(KeyCommand<'a>),
-  GetAndTouch(TouchCommand<'a>),
-  GetAndTouchQ(TouchCommand<'a>),
-  Set(SetCommand<'a>),
-  SetQ(SetCommand<'a>),
-  Add(SetCommand<'a>),
-  AddQ(SetCommand<'a>),
-  Replace(SetCommand<'a>),
-  ReplaceQ(SetCommand<'a>),
-  Append(AppendPrependCommand<'a>),
-  AppendQ(AppendPrependCommand<'a>),
-  Prepend(AppendPrependCommand<'a>),
-  PrependQ(AppendPrependCommand<'a>),
-  Delete(KeyCommand<'a>),
-  DeleteQ(KeyCommand<'a>),
-  Incr(IncrDecrCommand<'a>),
-  IncrQ(IncrDecrCommand<'a>),
-  Decr(IncrDecrCommand<'a>),
-  DecrQ(IncrDecrCommand<'a>),
-  Touch(TouchCommand<'a>),
-  TouchQ(TouchCommand<'a>),
+pub struct AppendPrependCommandRef<'a> {
+  key: Cow<'a, str>,
+  value: Cow<'a, [u8]>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AppendPrependCommand {
+  key: String,
+  value: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum CommandRef<'a> {
+  Get(KeyCommandRef<'a>),
+  GetQ(KeyCommandRef<'a>),
+  GetK(KeyCommandRef<'a>),
+  GetKQ(KeyCommandRef<'a>),
+  GetAndTouch(TouchCommandRef<'a>),
+  GetAndTouchQ(TouchCommandRef<'a>),
+  Set(SetCommandRef<'a>),
+  SetQ(SetCommandRef<'a>),
+  Add(SetCommandRef<'a>),
+  AddQ(SetCommandRef<'a>),
+  Replace(SetCommandRef<'a>),
+  ReplaceQ(SetCommandRef<'a>),
+  Append(AppendPrependCommandRef<'a>),
+  AppendQ(AppendPrependCommandRef<'a>),
+  Prepend(AppendPrependCommandRef<'a>),
+  PrependQ(AppendPrependCommandRef<'a>),
+  Delete(KeyCommandRef<'a>),
+  DeleteQ(KeyCommandRef<'a>),
+  Incr(IncrDecrCommandRef<'a>),
+  IncrQ(IncrDecrCommandRef<'a>),
+  Decr(IncrDecrCommandRef<'a>),
+  DecrQ(IncrDecrCommandRef<'a>),
+  Touch(TouchCommandRef<'a>),
+  TouchQ(TouchCommandRef<'a>),
   Flush,
   FlushQ,
   Version,
@@ -127,6 +486,117 @@ pub enum Command<'a> {
   Quit,
   QuitQ,
   Noop,
+}
+
+impl<'a> CommandRef<'a> {
+  pub fn to_command(&self) -> Command {
+    match self {
+      CommandRef::Get(KeyCommandRef { key }) => Command::Get(KeyCommand { key: key.to_string() }),
+      CommandRef::GetQ(KeyCommandRef { key }) => Command::GetQ(KeyCommand { key: key.to_string() }),
+      CommandRef::GetK(_) => todo!(),
+      CommandRef::GetKQ(_) => todo!(),
+      CommandRef::GetAndTouch(_) => todo!(),
+      CommandRef::GetAndTouchQ(_) => todo!(),
+      CommandRef::Set(_) => todo!(),
+      CommandRef::SetQ(_) => todo!(),
+      CommandRef::Add(_) => todo!(),
+      CommandRef::AddQ(_) => todo!(),
+      CommandRef::Replace(_) => todo!(),
+      CommandRef::ReplaceQ(_) => todo!(),
+      CommandRef::Append(_) => todo!(),
+      CommandRef::AppendQ(_) => todo!(),
+      CommandRef::Prepend(_) => todo!(),
+      CommandRef::PrependQ(_) => todo!(),
+      CommandRef::Delete(_) => todo!(),
+      CommandRef::DeleteQ(_) => todo!(),
+      CommandRef::Incr(_) => todo!(),
+      CommandRef::IncrQ(_) => todo!(),
+      CommandRef::Decr(_) => todo!(),
+      CommandRef::DecrQ(_) => todo!(),
+      CommandRef::Touch(_) => todo!(),
+      CommandRef::TouchQ(_) => todo!(),
+      CommandRef::Flush => todo!(),
+      CommandRef::FlushQ => todo!(),
+      CommandRef::Version => todo!(),
+      CommandRef::Stats => todo!(),
+      CommandRef::Quit => todo!(),
+      CommandRef::QuitQ => todo!(),
+      CommandRef::Noop => todo!(),
+    }
+  }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Command {
+  Get(KeyCommand),
+  GetQ(KeyCommand),
+  GetK(KeyCommand),
+  GetKQ(KeyCommand),
+  GetAndTouch(TouchCommand),
+  GetAndTouchQ(TouchCommand),
+  Set(SetCommand),
+  SetQ(SetCommand),
+  Add(SetCommand),
+  AddQ(SetCommand),
+  Replace(SetCommand),
+  ReplaceQ(SetCommand),
+  Append(AppendPrependCommand),
+  AppendQ(AppendPrependCommand),
+  Prepend(AppendPrependCommand),
+  PrependQ(AppendPrependCommand),
+  Delete(KeyCommand),
+  DeleteQ(KeyCommand),
+  Incr(IncrDecrCommand),
+  IncrQ(IncrDecrCommand),
+  Decr(IncrDecrCommand),
+  DecrQ(IncrDecrCommand),
+  Touch(TouchCommand),
+  TouchQ(TouchCommand),
+  Flush,
+  FlushQ,
+  Version,
+  Stats,
+  Quit,
+  QuitQ,
+  Noop,
+}
+
+impl Command {
+  pub fn to_command_ref(&self) -> CommandRef<'_> {
+    match self {
+      Command::Get(KeyCommand { key }) => CommandRef::Get(KeyCommandRef { key: key.into() }),
+      Command::GetQ(_) => todo!(),
+      Command::GetK(_) => todo!(),
+      Command::GetKQ(_) => todo!(),
+      Command::GetAndTouch(_) => todo!(),
+      Command::GetAndTouchQ(_) => todo!(),
+      Command::Set(_) => todo!(),
+      Command::SetQ(_) => todo!(),
+      Command::Add(_) => todo!(),
+      Command::AddQ(_) => todo!(),
+      Command::Replace(_) => todo!(),
+      Command::ReplaceQ(_) => todo!(),
+      Command::Append(_) => todo!(),
+      Command::AppendQ(_) => todo!(),
+      Command::Prepend(_) => todo!(),
+      Command::PrependQ(_) => todo!(),
+      Command::Delete(_) => todo!(),
+      Command::DeleteQ(_) => todo!(),
+      Command::Incr(_) => todo!(),
+      Command::IncrQ(_) => todo!(),
+      Command::Decr(_) => todo!(),
+      Command::DecrQ(_) => todo!(),
+      Command::Touch(_) => todo!(),
+      Command::TouchQ(_) => todo!(),
+      Command::Flush => todo!(),
+      Command::FlushQ => todo!(),
+      Command::Version => todo!(),
+      Command::Stats => todo!(),
+      Command::Quit => todo!(),
+      Command::QuitQ => todo!(),
+      Command::Noop => todo!(),
+    }
+  }
 }
 
 #[derive(Debug, PartialEq)]
@@ -154,7 +624,7 @@ where
   Ok(Some(buffer.freeze()))
 }
 
-pub fn decode_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandError> {
+pub fn decode_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeCommandError> {
   match input.get(0) {
     Some(0x80) => decode_binary_command(input).map(|v| vec![v]),
     Some(_) => decode_text_command(input),
@@ -162,7 +632,7 @@ pub fn decode_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandError> 
   }
 }
 
-pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandError> {
+pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeCommandError> {
   let mut chunks = input.splitn(2, |v| *v == b' ');
   let command = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
   let input = chunks.next().unwrap_or(&[]);
@@ -179,7 +649,13 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
   match command {
     b"get" | b"gets" => {
       let input = new_line_str(input)?;
-      Ok(input.split(' ').map(|key| Command::Get(KeyCommand { key })).collect())
+      Ok(
+        input
+          .split(' ')
+          .map(Into::into)
+          .map(|key| CommandRef::Get(KeyCommandRef { key }))
+          .collect(),
+      )
     }
     b"gat" | b"gats" => {
       let input = new_line_str(input)?;
@@ -191,20 +667,22 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
 
       Ok(
         chunks
-          .map(|key| Command::GetAndTouch(TouchCommand { key, exptime }))
+          .map(Into::into)
+          .map(|key| CommandRef::GetAndTouch(TouchCommandRef { key, exptime }))
           .collect(),
       )
     }
 
     b"set" | b"add" | b"replace" | b"cas" | b"append" | b"prepend" => {
       let pos = input.iter().position(|v| *v == b'\n').unwrap_or_else(|| input.len());
-      let (input, mut value) = (&input[..=pos], &input[pos + 1..]);
+      let (input, value) = (&input[..=pos], &input[pos + 1..]);
 
       let input = new_line_str(input)?;
 
       let mut chunks = input.split(" ");
 
       let key = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
+      let key = key.into();
 
       let flags = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
       let flags = flags.parse().map_err(|_| DecodeCommandError::InvalidFormat)?;
@@ -217,10 +695,11 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
         .parse::<usize>()
         .map_err(|_| DecodeCommandError::InvalidFormat)?;
 
-      value = value
+      let value = value
         .strip_suffix(b"\r\n")
         .or_else(|| value.strip_suffix(b"\n"))
         .ok_or(DecodeCommandError::UnexpectedEof)?;
+      let value = Cow::from(value);
 
       if value_len != value.len() {
         return Err(DecodeCommandError::InvalidFormat);
@@ -235,29 +714,57 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
 
       let noreply = chunks.next().filter(|v| *v == "noreply").is_some();
 
-      let set_cmd = SetCommand {
-        key,
-        value,
-        flags,
-        exptime,
-        cas,
+      let cmd = match command {
+        b"set" | b"cas" if noreply => CommandRef::SetQ(SetCommandRef {
+          key,
+          value,
+          flags,
+          exptime,
+          cas,
+        }),
+        b"set" | b"cas" => CommandRef::Set(SetCommandRef {
+          key,
+          value,
+          flags,
+          exptime,
+          cas,
+        }),
+        b"add" if noreply => CommandRef::AddQ(SetCommandRef {
+          key,
+          value,
+          flags,
+          exptime,
+          cas,
+        }),
+        b"add" => CommandRef::Add(SetCommandRef {
+          key,
+          value,
+          flags,
+          exptime,
+          cas,
+        }),
+        b"replace" if noreply => CommandRef::ReplaceQ(SetCommandRef {
+          key,
+          value,
+          flags,
+          exptime,
+          cas,
+        }),
+        b"replace" => CommandRef::Replace(SetCommandRef {
+          key,
+          value,
+          flags,
+          exptime,
+          cas,
+        }),
+        b"append" if noreply => CommandRef::AppendQ(AppendPrependCommandRef { key, value }),
+        b"append" => CommandRef::Append(AppendPrependCommandRef { key, value }),
+        b"prepend" if noreply => CommandRef::PrependQ(AppendPrependCommandRef { key, value }),
+        b"prepend" => CommandRef::Prepend(AppendPrependCommandRef { key, value }),
+        _ => unreachable!(),
       };
 
-      let append_cmd = AppendPrependCommand { key, value };
-
-      match command {
-        b"set" | b"cas" if noreply => Ok(vec![Command::SetQ(set_cmd)]),
-        b"set" | b"cas" => Ok(vec![Command::Set(set_cmd)]),
-        b"add" if noreply => Ok(vec![Command::AddQ(set_cmd)]),
-        b"add" => Ok(vec![Command::Add(set_cmd)]),
-        b"replace" if noreply => Ok(vec![Command::ReplaceQ(set_cmd)]),
-        b"replace" => Ok(vec![Command::Replace(set_cmd)]),
-        b"append" if noreply => Ok(vec![Command::AppendQ(append_cmd)]),
-        b"append" => Ok(vec![Command::Append(append_cmd)]),
-        b"prepend" if noreply => Ok(vec![Command::PrependQ(append_cmd)]),
-        b"prepend" => Ok(vec![Command::Prepend(append_cmd)]),
-        _ => unreachable!(),
-      }
+      Ok(vec![cmd])
     }
 
     b"delete" => {
@@ -266,12 +773,13 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
       let mut chunks = input.split(' ');
 
       let key = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
+      let key = key.into();
 
       let noreply = chunks.next().filter(|v| *v == "noreply").is_some();
       if noreply {
-        Ok(vec![Command::DeleteQ(KeyCommand { key })])
+        Ok(vec![CommandRef::DeleteQ(KeyCommandRef { key })])
       } else {
-        Ok(vec![Command::Delete(KeyCommand { key })])
+        Ok(vec![CommandRef::Delete(KeyCommandRef { key })])
       }
     }
     b"incr" | b"decr" => {
@@ -280,6 +788,7 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
       let mut chunks = input.split(' ');
 
       let key = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
+      let key = key.into();
 
       let delta = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
       let delta = delta.parse().map_err(|_| DecodeCommandError::InvalidFormat)?;
@@ -289,7 +798,7 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
 
       let noreply = chunks.next().filter(|v| *v == "noreply").is_some();
 
-      let cmd = IncrDecrCommand {
+      let cmd = IncrDecrCommandRef {
         key,
         delta,
         init,
@@ -297,10 +806,10 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
       };
 
       match command {
-        b"incr" if noreply => Ok(vec![Command::IncrQ(cmd)]),
-        b"incr" => Ok(vec![Command::Incr(cmd)]),
-        b"decr" if noreply => Ok(vec![Command::DecrQ(cmd)]),
-        b"decr" => Ok(vec![Command::Decr(cmd)]),
+        b"incr" if noreply => Ok(vec![CommandRef::IncrQ(cmd)]),
+        b"incr" => Ok(vec![CommandRef::Incr(cmd)]),
+        b"decr" if noreply => Ok(vec![CommandRef::DecrQ(cmd)]),
+        b"decr" => Ok(vec![CommandRef::Decr(cmd)]),
         _ => unreachable!(),
       }
     }
@@ -310,6 +819,7 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
       let mut chunks = input.split(' ');
 
       let key = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
+      let key = key.into();
 
       let exptime = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
       let exptime = exptime.parse().map_err(|_| DecodeCommandError::InvalidFormat)?;
@@ -317,20 +827,20 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<Command>, DecodeCommandEr
       let noreply = chunks.next().filter(|v| *v == "noreply").is_some();
 
       if noreply {
-        Ok(vec![Command::TouchQ(TouchCommand { key, exptime })])
+        Ok(vec![CommandRef::TouchQ(TouchCommandRef { key, exptime })])
       } else {
-        Ok(vec![Command::Touch(TouchCommand { key, exptime })])
+        Ok(vec![CommandRef::Touch(TouchCommandRef { key, exptime })])
       }
     }
-    b"flush_all\r\n" | b"flush_all\n" => Ok(vec![Command::Flush]),
-    b"version\r\n" | b"version\n" => Ok(vec![Command::Version]),
-    b"stats\r\n" | b"stats\n" => Ok(vec![Command::Stats]),
-    b"quit\r\n" | b"quit\n" => Ok(vec![Command::Quit]),
+    b"flush_all\r\n" | b"flush_all\n" => Ok(vec![CommandRef::Flush]),
+    b"version\r\n" | b"version\n" => Ok(vec![CommandRef::Version]),
+    b"stats\r\n" | b"stats\n" => Ok(vec![CommandRef::Stats]),
+    b"quit\r\n" | b"quit\n" => Ok(vec![CommandRef::Quit]),
     _ => Err(DecodeCommandError::InvalidCommand),
   }
 }
 
-pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandError> {
+pub fn decode_binary_command(mut input: &[u8]) -> Result<CommandRef, DecodeCommandError> {
   if input.len() < 24 {
     return Err(DecodeCommandError::UnexpectedEof);
   }
@@ -360,7 +870,10 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
     return Err(DecodeCommandError::UnexpectedEof);
   }
 
-  fn decode_key_command<'a>(header: &RequestHeader, mut input: &'a [u8]) -> Result<KeyCommand<'a>, DecodeCommandError> {
+  fn decode_key_command<'a>(
+    header: &RequestHeader,
+    mut input: &'a [u8],
+  ) -> Result<KeyCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -369,14 +882,19 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
     assert_eq!(key_len, body_len);
 
     let key = input.get(0..key_len).ok_or(DecodeCommandError::UnexpectedEof)?;
+    let key = std::str::from_utf8(key).map_err(|_| DecodeCommandError::InvalidFormat)?;
+    let key = key.into();
+
     input.advance(key_len);
     assert!(input.is_empty());
 
-    let key = std::str::from_utf8(key).map_err(|_| DecodeCommandError::InvalidFormat)?;
-    Ok(KeyCommand { key })
+    Ok(KeyCommandRef { key })
   }
 
-  fn decode_set_command<'a>(header: &RequestHeader, mut input: &'a [u8]) -> Result<SetCommand<'a>, DecodeCommandError> {
+  fn decode_set_command<'a>(
+    header: &RequestHeader,
+    mut input: &'a [u8],
+  ) -> Result<SetCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -391,15 +909,17 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
 
     let key = input.get(0..key_len).ok_or(DecodeCommandError::UnexpectedEof)?;
     let key = std::str::from_utf8(key).map_err(|_| DecodeCommandError::InvalidFormat)?;
+    let key = key.into();
     input.advance(key_len);
 
     let value = input.get(0..value_len).ok_or(DecodeCommandError::UnexpectedEof)?;
+    let value = value.into();
     input.advance(value_len);
 
     assert!(input.is_empty());
 
     let cas = None;
-    Ok(SetCommand {
+    Ok(SetCommandRef {
       key,
       value,
       flags,
@@ -411,7 +931,7 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
   fn decode_append_prepend_command<'a>(
     header: &RequestHeader,
     mut input: &'a [u8],
-  ) -> Result<AppendPrependCommand<'a>, DecodeCommandError> {
+  ) -> Result<AppendPrependCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -421,21 +941,23 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
 
     let key = input.get(0..key_len).ok_or(DecodeCommandError::UnexpectedEof)?;
     let key = std::str::from_utf8(key).map_err(|_| DecodeCommandError::InvalidFormat)?;
+    let key = key.into();
     input.advance(key_len);
 
     let value_len = body_len - key_len;
     let value = input.get(0..value_len).ok_or(DecodeCommandError::UnexpectedEof)?;
+    let value = value.into();
     input.advance(value_len);
 
     assert!(input.is_empty());
 
-    Ok(AppendPrependCommand { key, value })
+    Ok(AppendPrependCommandRef { key, value })
   }
 
   fn decode_incr_decr_command<'a>(
     header: &RequestHeader,
     mut input: &'a [u8],
-  ) -> Result<IncrDecrCommand<'a>, DecodeCommandError> {
+  ) -> Result<IncrDecrCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -449,10 +971,12 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
 
     let key = input.get(0..key_len).ok_or(DecodeCommandError::UnexpectedEof)?;
     let key = std::str::from_utf8(key).map_err(|_| DecodeCommandError::InvalidFormat)?;
+    let key = key.into();
+
     input.advance(key_len);
     assert!(input.is_empty());
 
-    Ok(IncrDecrCommand {
+    Ok(IncrDecrCommandRef {
       key,
       delta,
       init,
@@ -463,7 +987,7 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
   fn decode_touch_command<'a>(
     header: &RequestHeader,
     mut input: &'a [u8],
-  ) -> Result<TouchCommand<'a>, DecodeCommandError> {
+  ) -> Result<TouchCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -475,77 +999,79 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<Command, DecodeCommandE
 
     let key = input.get(0..key_len).ok_or(DecodeCommandError::UnexpectedEof)?;
     let key = std::str::from_utf8(key).map_err(|_| DecodeCommandError::InvalidFormat)?;
+    let key = key.into();
+
     input.advance(key_len);
     assert!(input.is_empty());
 
-    Ok(TouchCommand { key, exptime })
+    Ok(TouchCommandRef { key, exptime })
   }
 
   match op {
-    0x00 => decode_key_command(&header, input).map(Command::Get),
-    0x09 => decode_key_command(&header, input).map(Command::GetQ),
-    0x0c => decode_key_command(&header, input).map(Command::GetK),
-    0x0d => decode_key_command(&header, input).map(Command::GetKQ),
-    0x04 => decode_key_command(&header, input).map(Command::Delete),
-    0x14 => decode_key_command(&header, input).map(Command::DeleteQ),
-    0x01 => decode_set_command(&header, input).map(Command::Set),
-    0x11 => decode_set_command(&header, input).map(Command::SetQ),
-    0x02 => decode_set_command(&header, input).map(Command::Add),
-    0x12 => decode_set_command(&header, input).map(Command::AddQ),
-    0x03 => decode_set_command(&header, input).map(Command::Replace),
-    0x13 => decode_set_command(&header, input).map(Command::ReplaceQ),
-    0x0e => decode_append_prepend_command(&header, input).map(Command::Append),
-    0x19 => decode_append_prepend_command(&header, input).map(Command::AppendQ),
-    0x0f => decode_append_prepend_command(&header, input).map(Command::Prepend),
-    0x1a => decode_append_prepend_command(&header, input).map(Command::PrependQ),
-    0x05 => decode_incr_decr_command(&header, input).map(Command::Incr),
-    0x15 => decode_incr_decr_command(&header, input).map(Command::IncrQ),
-    0x06 => decode_incr_decr_command(&header, input).map(Command::Decr),
-    0x16 => decode_incr_decr_command(&header, input).map(Command::DecrQ),
-    0x1c => decode_touch_command(&header, input).map(Command::Touch),
-    0x1d => decode_touch_command(&header, input).map(Command::GetAndTouch),
-    0x1e => decode_touch_command(&header, input).map(Command::GetAndTouchQ),
+    0x00 => decode_key_command(&header, input).map(CommandRef::Get),
+    0x09 => decode_key_command(&header, input).map(CommandRef::GetQ),
+    0x0c => decode_key_command(&header, input).map(CommandRef::GetK),
+    0x0d => decode_key_command(&header, input).map(CommandRef::GetKQ),
+    0x04 => decode_key_command(&header, input).map(CommandRef::Delete),
+    0x14 => decode_key_command(&header, input).map(CommandRef::DeleteQ),
+    0x01 => decode_set_command(&header, input).map(CommandRef::Set),
+    0x11 => decode_set_command(&header, input).map(CommandRef::SetQ),
+    0x02 => decode_set_command(&header, input).map(CommandRef::Add),
+    0x12 => decode_set_command(&header, input).map(CommandRef::AddQ),
+    0x03 => decode_set_command(&header, input).map(CommandRef::Replace),
+    0x13 => decode_set_command(&header, input).map(CommandRef::ReplaceQ),
+    0x0e => decode_append_prepend_command(&header, input).map(CommandRef::Append),
+    0x19 => decode_append_prepend_command(&header, input).map(CommandRef::AppendQ),
+    0x0f => decode_append_prepend_command(&header, input).map(CommandRef::Prepend),
+    0x1a => decode_append_prepend_command(&header, input).map(CommandRef::PrependQ),
+    0x05 => decode_incr_decr_command(&header, input).map(CommandRef::Incr),
+    0x15 => decode_incr_decr_command(&header, input).map(CommandRef::IncrQ),
+    0x06 => decode_incr_decr_command(&header, input).map(CommandRef::Decr),
+    0x16 => decode_incr_decr_command(&header, input).map(CommandRef::DecrQ),
+    0x1c => decode_touch_command(&header, input).map(CommandRef::Touch),
+    0x1d => decode_touch_command(&header, input).map(CommandRef::GetAndTouch),
+    0x1e => decode_touch_command(&header, input).map(CommandRef::GetAndTouchQ),
     0x07 => {
       assert_eq!(0, extras_len);
       assert_eq!(0, key_len);
       assert_eq!(0, body_len);
-      Ok(Command::Quit)
+      Ok(CommandRef::Quit)
     }
     0x17 => {
       assert_eq!(0, extras_len);
       assert_eq!(0, key_len);
       assert_eq!(0, body_len);
-      Ok(Command::QuitQ)
+      Ok(CommandRef::QuitQ)
     }
     0x08 => {
       assert_eq!(0, extras_len);
       assert_eq!(0, key_len);
       assert_eq!(0, body_len);
-      Ok(Command::Flush)
+      Ok(CommandRef::Flush)
     }
     0x18 => {
       assert_eq!(0, extras_len);
       assert_eq!(0, key_len);
       assert_eq!(0, body_len);
-      Ok(Command::FlushQ)
+      Ok(CommandRef::FlushQ)
     }
     0x0a => {
       assert_eq!(0, extras_len);
       assert_eq!(0, key_len);
       assert_eq!(0, body_len);
-      Ok(Command::Noop)
+      Ok(CommandRef::Noop)
     }
     0x0b => {
       assert_eq!(0, extras_len);
       assert_eq!(0, key_len);
       assert_eq!(0, body_len);
-      Ok(Command::Version)
+      Ok(CommandRef::Version)
     }
     0x10 => {
       assert_eq!(0, extras_len);
       assert_eq!(0, key_len);
       assert_eq!(0, body_len);
-      Ok(Command::Stats)
+      Ok(CommandRef::Stats)
     }
     _ => Err(DecodeCommandError::InvalidCommand),
   }
@@ -556,8 +1082,8 @@ pub enum EncodeCommandError {
   NotSupported,
 }
 
-pub fn encode_binary_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeCommandError> {
-  fn encode_key_command(op: u8, cmd: &KeyCommand<'_>) -> Vec<u8> {
+pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeCommandError> {
+  fn encode_key_command(op: u8, cmd: &KeyCommandRef) -> Vec<u8> {
     let mut buffer = Vec::new();
     let key_len = cmd.key.len();
     let body_len = key_len;
@@ -586,7 +1112,7 @@ pub fn encode_binary_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeCom
     buffer
   }
 
-  fn encode_set_command(op: u8, cmd: &SetCommand<'_>) -> Vec<u8> {
+  fn encode_set_command(op: u8, cmd: &SetCommandRef) -> Vec<u8> {
     let mut buffer = Vec::new();
     let key_len = cmd.key.len();
     let extras_len = 8;
@@ -607,11 +1133,11 @@ pub fn encode_binary_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeCom
     buffer.put_u32(cmd.flags);
     buffer.put_u32(cmd.exptime);
     buffer.put(cmd.key.as_bytes());
-    buffer.put(cmd.value);
+    buffer.put(cmd.value.as_ref());
     buffer
   }
 
-  fn encode_append_prepend_command(op: u8, cmd: &AppendPrependCommand<'_>) -> Vec<u8> {
+  fn encode_append_prepend_command(op: u8, cmd: &AppendPrependCommandRef) -> Vec<u8> {
     let mut buffer = Vec::new();
     let key_len = cmd.key.len();
     let value_len = cmd.value.len();
@@ -626,11 +1152,11 @@ pub fn encode_binary_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeCom
       },
     );
     buffer.put(cmd.key.as_bytes());
-    buffer.put(cmd.value);
+    buffer.put(cmd.value.as_ref());
     buffer
   }
 
-  fn encode_incr_decr_command(op: u8, cmd: &IncrDecrCommand<'_>) -> Vec<u8> {
+  fn encode_incr_decr_command(op: u8, cmd: &IncrDecrCommandRef) -> Vec<u8> {
     let mut buffer = Vec::new();
     let key_len = cmd.key.len();
     let extras_len = 20;
@@ -652,7 +1178,7 @@ pub fn encode_binary_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeCom
     buffer
   }
 
-  fn encode_touch_command(op: u8, cmd: &TouchCommand<'_>) -> Vec<u8> {
+  fn encode_touch_command(op: u8, cmd: &TouchCommandRef) -> Vec<u8> {
     let mut buffer = Vec::new();
     let key_len = cmd.key.len();
     let extras_len = 4;
@@ -673,42 +1199,42 @@ pub fn encode_binary_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeCom
   }
 
   match command {
-    Command::GetQ(cmd) => Ok(encode_key_command(0x09, cmd)),
-    Command::Get(cmd) => Ok(encode_key_command(0x00, cmd)),
-    Command::GetKQ(cmd) => Ok(encode_key_command(0x0d, cmd)),
-    Command::GetK(cmd) => Ok(encode_key_command(0x0c, cmd)),
-    Command::GetAndTouchQ(cmd) => Ok(encode_touch_command(0x1e, cmd)),
-    Command::GetAndTouch(cmd) => Ok(encode_touch_command(0x1d, cmd)),
-    Command::Set(cmd) => Ok(encode_set_command(0x01, cmd)),
-    Command::SetQ(cmd) => Ok(encode_set_command(0x11, cmd)),
-    Command::Add(cmd) => Ok(encode_set_command(0x02, cmd)),
-    Command::AddQ(cmd) => Ok(encode_set_command(0x12, cmd)),
-    Command::Replace(cmd) => Ok(encode_set_command(0x03, cmd)),
-    Command::ReplaceQ(cmd) => Ok(encode_set_command(0x13, cmd)),
-    Command::Append(cmd) => Ok(encode_append_prepend_command(0x0e, cmd)),
-    Command::AppendQ(cmd) => Ok(encode_append_prepend_command(0x19, cmd)),
-    Command::Prepend(cmd) => Ok(encode_append_prepend_command(0x0f, cmd)),
-    Command::PrependQ(cmd) => Ok(encode_append_prepend_command(0x1a, cmd)),
-    Command::DeleteQ(cmd) => Ok(encode_key_command(0x14, cmd)),
-    Command::Delete(cmd) => Ok(encode_key_command(0x04, cmd)),
-    Command::IncrQ(cmd) => Ok(encode_incr_decr_command(0x15, cmd)),
-    Command::Incr(cmd) => Ok(encode_incr_decr_command(0x05, cmd)),
-    Command::DecrQ(cmd) => Ok(encode_incr_decr_command(0x16, cmd)),
-    Command::Decr(cmd) => Ok(encode_incr_decr_command(0x06, cmd)),
-    Command::TouchQ(_) => Err(EncodeCommandError::NotSupported),
-    Command::Touch(cmd) => Ok(encode_touch_command(0x1c, cmd)),
-    Command::FlushQ => Ok(encode_simple_command(0x18)),
-    Command::Flush => Ok(encode_simple_command(0x08)),
-    Command::Version => Ok(encode_simple_command(0x0b)),
-    Command::Stats => Ok(encode_simple_command(0x10)),
-    Command::QuitQ => Ok(encode_simple_command(0x17)),
-    Command::Quit => Ok(encode_simple_command(0x07)),
-    Command::Noop => Ok(encode_simple_command(0x0a)),
+    CommandRef::GetQ(cmd) => Ok(encode_key_command(0x09, cmd)),
+    CommandRef::Get(cmd) => Ok(encode_key_command(0x00, cmd)),
+    CommandRef::GetKQ(cmd) => Ok(encode_key_command(0x0d, cmd)),
+    CommandRef::GetK(cmd) => Ok(encode_key_command(0x0c, cmd)),
+    CommandRef::GetAndTouchQ(cmd) => Ok(encode_touch_command(0x1e, cmd)),
+    CommandRef::GetAndTouch(cmd) => Ok(encode_touch_command(0x1d, cmd)),
+    CommandRef::Set(cmd) => Ok(encode_set_command(0x01, cmd)),
+    CommandRef::SetQ(cmd) => Ok(encode_set_command(0x11, cmd)),
+    CommandRef::Add(cmd) => Ok(encode_set_command(0x02, cmd)),
+    CommandRef::AddQ(cmd) => Ok(encode_set_command(0x12, cmd)),
+    CommandRef::Replace(cmd) => Ok(encode_set_command(0x03, cmd)),
+    CommandRef::ReplaceQ(cmd) => Ok(encode_set_command(0x13, cmd)),
+    CommandRef::Append(cmd) => Ok(encode_append_prepend_command(0x0e, cmd)),
+    CommandRef::AppendQ(cmd) => Ok(encode_append_prepend_command(0x19, cmd)),
+    CommandRef::Prepend(cmd) => Ok(encode_append_prepend_command(0x0f, cmd)),
+    CommandRef::PrependQ(cmd) => Ok(encode_append_prepend_command(0x1a, cmd)),
+    CommandRef::DeleteQ(cmd) => Ok(encode_key_command(0x14, cmd)),
+    CommandRef::Delete(cmd) => Ok(encode_key_command(0x04, cmd)),
+    CommandRef::IncrQ(cmd) => Ok(encode_incr_decr_command(0x15, cmd)),
+    CommandRef::Incr(cmd) => Ok(encode_incr_decr_command(0x05, cmd)),
+    CommandRef::DecrQ(cmd) => Ok(encode_incr_decr_command(0x16, cmd)),
+    CommandRef::Decr(cmd) => Ok(encode_incr_decr_command(0x06, cmd)),
+    CommandRef::TouchQ(_) => Err(EncodeCommandError::NotSupported),
+    CommandRef::Touch(cmd) => Ok(encode_touch_command(0x1c, cmd)),
+    CommandRef::FlushQ => Ok(encode_simple_command(0x18)),
+    CommandRef::Flush => Ok(encode_simple_command(0x08)),
+    CommandRef::Version => Ok(encode_simple_command(0x0b)),
+    CommandRef::Stats => Ok(encode_simple_command(0x10)),
+    CommandRef::QuitQ => Ok(encode_simple_command(0x17)),
+    CommandRef::Quit => Ok(encode_simple_command(0x07)),
+    CommandRef::Noop => Ok(encode_simple_command(0x0a)),
   }
 }
 
-pub fn encode_text_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeCommandError> {
-  fn encode_set_command(op: &str, noreply: bool, cmd: &SetCommand<'_>) -> Result<Vec<u8>, EncodeCommandError> {
+pub fn encode_text_command(command: &CommandRef) -> Result<Vec<u8>, EncodeCommandError> {
+  fn encode_set_command(op: &str, noreply: bool, cmd: &SetCommandRef) -> Result<Vec<u8>, EncodeCommandError> {
     let mut buffer = match (op, cmd.cas) {
       ("set", Some(cas)) => Ok(
         format!(
@@ -728,54 +1254,60 @@ pub fn encode_text_command(command: &Command<'_>) -> Result<Vec<u8>, EncodeComma
       buffer.extend_from_slice(b" noreply");
     }
     buffer.extend_from_slice(b"\r\n");
-    buffer.extend_from_slice(cmd.value);
+    buffer.extend_from_slice(cmd.value.as_ref());
     buffer.extend_from_slice(b"\r\n");
     Ok(buffer)
   }
 
-  fn encode_append_prepend_command(op: &str, noreply: bool, cmd: &AppendPrependCommand<'_>) -> Vec<u8> {
+  fn encode_append_prepend_command(op: &str, noreply: bool, cmd: &AppendPrependCommandRef) -> Vec<u8> {
     let mut buffer = format!("{} {} 0 0 {}", op, cmd.key, cmd.value.len()).into_bytes();
     if noreply {
       buffer.extend_from_slice(b" noreply");
     }
     buffer.extend_from_slice(b"\r\n");
-    buffer.extend_from_slice(cmd.value);
+    buffer.extend_from_slice(cmd.value.as_ref());
     buffer.extend_from_slice(b"\r\n");
     buffer
   }
 
   match command {
-    Command::GetQ(_) => Err(EncodeCommandError::NotSupported),
-    Command::Get(KeyCommand { key }) => Ok(format!("get {key}\r\n").into_bytes()),
-    Command::GetKQ(_) => Err(EncodeCommandError::NotSupported),
-    Command::GetK(_) => Err(EncodeCommandError::NotSupported),
-    Command::GetAndTouchQ(_) => Err(EncodeCommandError::NotSupported),
-    Command::GetAndTouch(TouchCommand { key, exptime }) => Ok(format!("gat {exptime} {key}\r\n").into_bytes()),
-    Command::Set(cmd) => encode_set_command("set", false, cmd),
-    Command::SetQ(cmd) => encode_set_command("set", true, cmd),
-    Command::Add(cmd) => encode_set_command("add", false, cmd),
-    Command::AddQ(cmd) => encode_set_command("add", true, cmd),
-    Command::Replace(cmd) => encode_set_command("replace", false, cmd),
-    Command::ReplaceQ(cmd) => encode_set_command("replace", true, cmd),
-    Command::Append(cmd) => Ok(encode_append_prepend_command("append", false, cmd)),
-    Command::AppendQ(cmd) => Ok(encode_append_prepend_command("append", true, cmd)),
-    Command::Prepend(cmd) => Ok(encode_append_prepend_command("prepend", false, cmd)),
-    Command::PrependQ(cmd) => Ok(encode_append_prepend_command("prepend", true, cmd)),
-    Command::DeleteQ(KeyCommand { key }) => Ok(format!("delete {key} noreply\r\n").into_bytes()),
-    Command::Delete(KeyCommand { key }) => Ok(format!("delete {key}\r\n").into_bytes()),
-    Command::IncrQ(IncrDecrCommand { key, delta, .. }) => Ok(format!("incr {key} {delta} noreply\r\n").into_bytes()),
-    Command::Incr(IncrDecrCommand { key, delta, .. }) => Ok(format!("incr {key} {delta}\r\n").into_bytes()),
-    Command::DecrQ(IncrDecrCommand { key, delta, .. }) => Ok(format!("decr {key} {delta} noreply\r\n").into_bytes()),
-    Command::Decr(IncrDecrCommand { key, delta, .. }) => Ok(format!("decr {key} {delta}\r\n").into_bytes()),
-    Command::TouchQ(TouchCommand { key, exptime }) => Ok(format!("touch {key} {exptime} noreply\r\n").into_bytes()),
-    Command::Touch(TouchCommand { key, exptime }) => Ok(format!("touch {key} {exptime}\r\n").into_bytes()),
-    Command::FlushQ => Err(EncodeCommandError::NotSupported),
-    Command::Flush => Ok("flush_all\r\n".into()),
-    Command::Version => Ok("version\r\n".into()),
-    Command::Stats => Ok("stats\r\n".into()),
-    Command::QuitQ => Err(EncodeCommandError::NotSupported),
-    Command::Quit => Ok("quit\r\n".into()),
-    Command::Noop => Err(EncodeCommandError::NotSupported),
+    CommandRef::GetQ(_) => Err(EncodeCommandError::NotSupported),
+    CommandRef::Get(KeyCommandRef { key }) => Ok(format!("get {key}\r\n").into_bytes()),
+    CommandRef::GetKQ(_) => Err(EncodeCommandError::NotSupported),
+    CommandRef::GetK(_) => Err(EncodeCommandError::NotSupported),
+    CommandRef::GetAndTouchQ(_) => Err(EncodeCommandError::NotSupported),
+    CommandRef::GetAndTouch(TouchCommandRef { key, exptime }) => Ok(format!("gat {exptime} {key}\r\n").into_bytes()),
+    CommandRef::Set(cmd) => encode_set_command("set", false, cmd),
+    CommandRef::SetQ(cmd) => encode_set_command("set", true, cmd),
+    CommandRef::Add(cmd) => encode_set_command("add", false, cmd),
+    CommandRef::AddQ(cmd) => encode_set_command("add", true, cmd),
+    CommandRef::Replace(cmd) => encode_set_command("replace", false, cmd),
+    CommandRef::ReplaceQ(cmd) => encode_set_command("replace", true, cmd),
+    CommandRef::Append(cmd) => Ok(encode_append_prepend_command("append", false, cmd)),
+    CommandRef::AppendQ(cmd) => Ok(encode_append_prepend_command("append", true, cmd)),
+    CommandRef::Prepend(cmd) => Ok(encode_append_prepend_command("prepend", false, cmd)),
+    CommandRef::PrependQ(cmd) => Ok(encode_append_prepend_command("prepend", true, cmd)),
+    CommandRef::DeleteQ(KeyCommandRef { key }) => Ok(format!("delete {key} noreply\r\n").into_bytes()),
+    CommandRef::Delete(KeyCommandRef { key }) => Ok(format!("delete {key}\r\n").into_bytes()),
+    CommandRef::IncrQ(IncrDecrCommandRef { key, delta, .. }) => {
+      Ok(format!("incr {key} {delta} noreply\r\n").into_bytes())
+    }
+    CommandRef::Incr(IncrDecrCommandRef { key, delta, .. }) => Ok(format!("incr {key} {delta}\r\n").into_bytes()),
+    CommandRef::DecrQ(IncrDecrCommandRef { key, delta, .. }) => {
+      Ok(format!("decr {key} {delta} noreply\r\n").into_bytes())
+    }
+    CommandRef::Decr(IncrDecrCommandRef { key, delta, .. }) => Ok(format!("decr {key} {delta}\r\n").into_bytes()),
+    CommandRef::TouchQ(TouchCommandRef { key, exptime }) => {
+      Ok(format!("touch {key} {exptime} noreply\r\n").into_bytes())
+    }
+    CommandRef::Touch(TouchCommandRef { key, exptime }) => Ok(format!("touch {key} {exptime}\r\n").into_bytes()),
+    CommandRef::FlushQ => Err(EncodeCommandError::NotSupported),
+    CommandRef::Flush => Ok("flush_all\r\n".into()),
+    CommandRef::Version => Ok("version\r\n".into()),
+    CommandRef::Stats => Ok("stats\r\n".into()),
+    CommandRef::QuitQ => Err(EncodeCommandError::NotSupported),
+    CommandRef::Quit => Ok("quit\r\n".into()),
+    CommandRef::Noop => Err(EncodeCommandError::NotSupported),
   }
 }
 
@@ -804,48 +1336,56 @@ fn put_request_header(buffer: &mut Vec<u8>, h: &RequestHeader) {
 #[cfg(test)]
 mod tests {
 
+  use std::borrow::Cow;
+
   use super::{
-    decode_binary_command, decode_text_command, encode_binary_command, encode_text_command, AppendPrependCommand,
-    Command, DecodeCommandError, IncrDecrCommand, KeyCommand, SetCommand, TouchCommand,
+    decode_binary_command, decode_text_command, encode_binary_command, encode_text_command, AppendPrependCommandRef,
+    CommandRef, DecodeCommandError, IncrDecrCommandRef, KeyCommandRef, SetCommandRef, TouchCommandRef,
   };
 
   #[test]
   fn test_decode_text_command() {
     let tests: &[(&[u8], _)] = &[
-      (b"get foo\r\n", Ok(vec![Command::Get(KeyCommand { key: "foo" })])),
+      (
+        b"get foo\r\n",
+        Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo".into() })]),
+      ),
       (
         b"get foo bar\r\n",
         Ok(vec![
-          Command::Get(KeyCommand { key: "foo" }),
-          Command::Get(KeyCommand { key: "bar" }),
+          CommandRef::Get(KeyCommandRef { key: "foo".into() }),
+          CommandRef::Get(KeyCommandRef { key: "bar".into() }),
         ]),
       ),
-      (b"gets foo\r\n", Ok(vec![Command::Get(KeyCommand { key: "foo" })])),
+      (
+        b"gets foo\r\n",
+        Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo".into() })]),
+      ),
       (
         b"gets foo bar\r\n",
         Ok(vec![
-          Command::Get(KeyCommand { key: "foo" }),
-          Command::Get(KeyCommand { key: "bar" }),
+          CommandRef::Get(KeyCommandRef { key: "foo".into() }),
+          CommandRef::Get(KeyCommandRef { key: "bar".into() }),
         ]),
       ),
       (
         b"touch foo 123\r\n",
-        Ok(vec![Command::Touch(TouchCommand {
-          key: "foo",
+        Ok(vec![CommandRef::Touch(TouchCommandRef {
+          key: "foo".into(),
           exptime: 123,
         })]),
       ),
       (
         b"touch foo 123 noreply\r\n",
-        Ok(vec![Command::TouchQ(TouchCommand {
-          key: "foo",
+        Ok(vec![CommandRef::TouchQ(TouchCommandRef {
+          key: "foo".into(),
           exptime: 123,
         })]),
       ),
       (
         b"incr foo 2\r\n",
-        Ok(vec![Command::Incr(IncrDecrCommand {
-          key: "foo",
+        Ok(vec![CommandRef::Incr(IncrDecrCommandRef {
+          key: "foo".into(),
           delta: 2,
           init: 0,
           exptime: 0,
@@ -853,8 +1393,8 @@ mod tests {
       ),
       (
         b"incr foo 2 noreply\r\n",
-        Ok(vec![Command::IncrQ(IncrDecrCommand {
-          key: "foo",
+        Ok(vec![CommandRef::IncrQ(IncrDecrCommandRef {
+          key: "foo".into(),
           delta: 2,
           init: 0,
           exptime: 0,
@@ -862,8 +1402,8 @@ mod tests {
       ),
       (
         b"decr foo 2\r\n",
-        Ok(vec![Command::Decr(IncrDecrCommand {
-          key: "foo",
+        Ok(vec![CommandRef::Decr(IncrDecrCommandRef {
+          key: "foo".into(),
           delta: 2,
           init: 0,
           exptime: 0,
@@ -871,23 +1411,26 @@ mod tests {
       ),
       (
         b"decr foo 2 noreply\r\n",
-        Ok(vec![Command::DecrQ(IncrDecrCommand {
-          key: "foo",
+        Ok(vec![CommandRef::DecrQ(IncrDecrCommandRef {
+          key: "foo".into(),
           delta: 2,
           init: 0,
           exptime: 0,
         })]),
       ),
-      (b"delete foo\r\n", Ok(vec![Command::Delete(KeyCommand { key: "foo" })])),
+      (
+        b"delete foo\r\n",
+        Ok(vec![CommandRef::Delete(KeyCommandRef { key: "foo".into() })]),
+      ),
       (
         b"delete foo noreply\r\n",
-        Ok(vec![Command::DeleteQ(KeyCommand { key: "foo" })]),
+        Ok(vec![CommandRef::DeleteQ(KeyCommandRef { key: "foo".into() })]),
       ),
       (
         b"set foo 123 321 3\r\nbar\r\n",
-        Ok(vec![Command::Set(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::Set(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: None,
@@ -895,9 +1438,9 @@ mod tests {
       ),
       (
         b"set foo 123 321 0\r\n\r\n",
-        Ok(vec![Command::Set(SetCommand {
-          key: "foo",
-          value: b"",
+        Ok(vec![CommandRef::Set(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b""),
           flags: 123,
           exptime: 321,
           cas: None,
@@ -905,9 +1448,9 @@ mod tests {
       ),
       (
         b"set foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![Command::SetQ(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::SetQ(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: None,
@@ -918,9 +1461,9 @@ mod tests {
       (b"set foo 123 321\r\nb\r\n", Err(DecodeCommandError::UnexpectedEof)),
       (
         b"add foo 123 321 3\r\nbar\r\n",
-        Ok(vec![Command::Add(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::Add(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: None,
@@ -928,9 +1471,9 @@ mod tests {
       ),
       (
         b"add foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![Command::AddQ(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::AddQ(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: None,
@@ -938,9 +1481,9 @@ mod tests {
       ),
       (
         b"replace foo 123 321 3\r\nbar\r\n",
-        Ok(vec![Command::Replace(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::Replace(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: None,
@@ -948,9 +1491,9 @@ mod tests {
       ),
       (
         b"replace foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![Command::ReplaceQ(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::ReplaceQ(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: None,
@@ -958,37 +1501,37 @@ mod tests {
       ),
       (
         b"append foo 123 321 3\r\nbar\r\n",
-        Ok(vec![Command::Append(AppendPrependCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::Append(AppendPrependCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
         })]),
       ),
       (
         b"append foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![Command::AppendQ(AppendPrependCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::AppendQ(AppendPrependCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
         })]),
       ),
       (
         b"prepend foo 123 321 3\r\nbar\r\n",
-        Ok(vec![Command::Prepend(AppendPrependCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::Prepend(AppendPrependCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
         })]),
       ),
       (
         b"prepend foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![Command::PrependQ(AppendPrependCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::PrependQ(AppendPrependCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
         })]),
       ),
       (
         b"cas foo 123 321 3 567\r\nbar\r\n",
-        Ok(vec![Command::Set(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::Set(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: Some(567),
@@ -996,9 +1539,9 @@ mod tests {
       ),
       (
         b"cas foo 123 321 0 567\r\n\r\n",
-        Ok(vec![Command::Set(SetCommand {
-          key: "foo",
-          value: b"",
+        Ok(vec![CommandRef::Set(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b""),
           flags: 123,
           exptime: 321,
           cas: Some(567),
@@ -1006,18 +1549,18 @@ mod tests {
       ),
       (
         b"cas foo 123 321 3 567 noreply\r\nbar\r\n",
-        Ok(vec![Command::SetQ(SetCommand {
-          key: "foo",
-          value: b"bar",
+        Ok(vec![CommandRef::SetQ(SetCommandRef {
+          key: "foo".into(),
+          value: Cow::Borrowed(b"bar"),
           flags: 123,
           exptime: 321,
           cas: Some(567),
         })]),
       ),
-      (b"flush_all\r\n", Ok(vec![Command::Flush])),
-      (b"version\r\n", Ok(vec![Command::Version])),
-      (b"stats\r\n", Ok(vec![Command::Stats])),
-      (b"quit\r\n", Ok(vec![Command::Quit])),
+      (b"flush_all\r\n", Ok(vec![CommandRef::Flush])),
+      (b"version\r\n", Ok(vec![CommandRef::Version])),
+      (b"stats\r\n", Ok(vec![CommandRef::Stats])),
+      (b"quit\r\n", Ok(vec![CommandRef::Quit])),
     ];
 
     for t in tests {
@@ -1029,104 +1572,104 @@ mod tests {
   #[test]
   fn test_text_command_roundtrip() {
     let tests = &[
-      Command::Get(KeyCommand { key: "foo" }),
-      Command::GetAndTouch(TouchCommand {
-        key: "foo",
+      CommandRef::Get(KeyCommandRef { key: "foo".into() }),
+      CommandRef::GetAndTouch(TouchCommandRef {
+        key: "foo".into(),
         exptime: 123,
       }),
-      Command::Set(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Set(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::SetQ(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::SetQ(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::Add(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Add(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::AddQ(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::AddQ(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::Replace(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Replace(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::ReplaceQ(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::ReplaceQ(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::Append(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Append(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::AppendQ(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::AppendQ(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::Prepend(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Prepend(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::PrependQ(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::PrependQ(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::Set(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Set(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: Some(456),
       }),
-      Command::SetQ(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::SetQ(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: Some(456),
       }),
-      Command::Delete(KeyCommand { key: "foo" }),
-      Command::Incr(IncrDecrCommand {
-        key: "foo",
+      CommandRef::Delete(KeyCommandRef { key: "foo".into() }),
+      CommandRef::Incr(IncrDecrCommandRef {
+        key: "foo".into(),
         delta: 123,
         init: 0,
         exptime: 0,
       }),
-      Command::Decr(IncrDecrCommand {
-        key: "foo",
+      CommandRef::Decr(IncrDecrCommandRef {
+        key: "foo".into(),
         delta: 123,
         init: 0,
         exptime: 0,
       }),
-      Command::Touch(TouchCommand {
-        key: "foo",
+      CommandRef::Touch(TouchCommandRef {
+        key: "foo".into(),
         exptime: 123,
       }),
-      Command::Flush,
-      Command::Version,
-      Command::Stats,
-      Command::Quit,
+      CommandRef::Flush,
+      CommandRef::Version,
+      CommandRef::Stats,
+      CommandRef::Quit,
     ];
 
     for expected in tests.into_iter() {
@@ -1140,100 +1683,100 @@ mod tests {
   #[test]
   fn test_binary_command_roundtrip() {
     let tests = &[
-      Command::Get(KeyCommand { key: "foo" }),
-      Command::GetAndTouch(TouchCommand {
-        key: "foo",
+      CommandRef::Get(KeyCommandRef { key: "foo".into() }),
+      CommandRef::GetAndTouch(TouchCommandRef {
+        key: "foo".into(),
         exptime: 123,
       }),
-      Command::Delete(KeyCommand { key: "foo" }),
-      Command::Set(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Delete(KeyCommandRef { key: "foo".into() }),
+      CommandRef::Set(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::SetQ(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::SetQ(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::Add(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Add(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::AddQ(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::AddQ(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::Replace(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Replace(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::ReplaceQ(SetCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::ReplaceQ(SetCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
         flags: 123,
         exptime: 321,
         cas: None,
       }),
-      Command::Append(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Append(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::AppendQ(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::AppendQ(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::Prepend(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::Prepend(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::PrependQ(AppendPrependCommand {
-        key: "foo",
-        value: b"bar",
+      CommandRef::PrependQ(AppendPrependCommandRef {
+        key: "foo".into(),
+        value: Cow::Borrowed(b"bar"),
       }),
-      Command::Incr(IncrDecrCommand {
-        key: "foo",
+      CommandRef::Incr(IncrDecrCommandRef {
+        key: "foo".into(),
         delta: 1,
         init: 0,
         exptime: 0,
       }),
-      Command::IncrQ(IncrDecrCommand {
-        key: "foo",
+      CommandRef::IncrQ(IncrDecrCommandRef {
+        key: "foo".into(),
         delta: 1,
         init: 0,
         exptime: 0,
       }),
-      Command::Decr(IncrDecrCommand {
-        key: "foo",
+      CommandRef::Decr(IncrDecrCommandRef {
+        key: "foo".into(),
         delta: 1,
         init: 0,
         exptime: 0,
       }),
-      Command::DecrQ(IncrDecrCommand {
-        key: "foo",
+      CommandRef::DecrQ(IncrDecrCommandRef {
+        key: "foo".into(),
         delta: 1,
         init: 0,
         exptime: 0,
       }),
-      Command::FlushQ,
-      Command::Flush,
-      Command::Version,
-      Command::Stats,
-      Command::QuitQ,
-      Command::Quit,
+      CommandRef::FlushQ,
+      CommandRef::Flush,
+      CommandRef::Version,
+      CommandRef::Stats,
+      CommandRef::QuitQ,
+      CommandRef::Quit,
     ];
 
     for expected in tests.into_iter() {
