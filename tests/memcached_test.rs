@@ -4,7 +4,7 @@ use kvp::memcached::{BinaryConnection, Connection};
 
 #[tokio::test]
 async fn test_memcached() {
-  let mut conn = BinaryConnection::connect("tcp://localhost:11211".parse().unwrap())
+  let conn = BinaryConnection::connect("tcp://localhost:11211".parse().unwrap())
     .await
     .unwrap();
 

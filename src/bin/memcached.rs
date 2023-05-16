@@ -2,7 +2,7 @@ use std::{io, sync::Arc};
 
 use clap::{Arg, ArgAction, Command};
 use tokio::{
-  io::{AsyncBufReadExt, BufReader, BufStream, BufWriter},
+  io::{BufReader, BufWriter},
   net::{TcpListener, TcpStream, UnixListener, UnixStream},
 };
 use url::Url;
@@ -86,17 +86,17 @@ async fn main() -> io::Result<()> {
 }
 
 fn parse_named_url(input: &str) -> Result<(String, Url), String> {
-  let (name, url) = input.split_once("=").ok_or_else(|| "invalid format".to_string())?;
+  let (name, url) = input.split_once('=').ok_or_else(|| "invalid format".to_string())?;
   let name = name.to_string();
   let url = Url::parse(url).map_err(|err| err.to_string())?;
   Ok((name, url))
 }
 
-async fn handle_tcp_stream(stream: TcpStream, router: Arc<Router<ConnectionPool<memcached::Connection>>>) {
+async fn handle_tcp_stream(stream: TcpStream, _router: Arc<Router<ConnectionPool<memcached::Connection>>>) {
   println!("connect");
   let (r, w) = stream.into_split();
   let mut r = BufReader::new(r);
-  let w = BufWriter::new(w);
+  let _w = BufWriter::new(w);
 
   let interrupt = tokio::signal::ctrl_c();
   tokio::pin!(interrupt);
@@ -118,4 +118,4 @@ async fn handle_tcp_stream(stream: TcpStream, router: Arc<Router<ConnectionPool<
   println!("disconnect");
 }
 
-async fn handle_unix_stream(stream: UnixStream, router: Arc<Router<ConnectionPool<memcached::Connection>>>) {}
+async fn handle_unix_stream(_stream: UnixStream, _router: Arc<Router<ConnectionPool<memcached::Connection>>>) {}

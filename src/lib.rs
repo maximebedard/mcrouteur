@@ -108,7 +108,7 @@ pub async fn spawn_manager() -> ConnectionPoolManager<memcached::Connection> {
         ConnectionPoolManagerEvent::Disconnect { connection: _, sender } => {
           sender.send(Ok(())).ok();
         }
-        ConnectionPoolManagerEvent::Ping { mut connection, sender } => {
+        ConnectionPoolManagerEvent::Ping { connection, sender } => {
           // let is_ok = connection.ping().await.is_ok();
           sender.send(Ok(connection)).ok();
         }
@@ -242,7 +242,7 @@ impl<C> ConnectionPool<C> {
       }
       None => {
         let last_aquired_at = Instant::now();
-        let created_at = last_aquired_at.clone();
+        let created_at = last_aquired_at;
         let inner = self.manager.connect().await?;
         ConnectionWrapper {
           inner,
