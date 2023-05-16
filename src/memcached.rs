@@ -1,47 +1,25 @@
 use std::{
-  borrow::Cow,
   collections::BTreeMap,
   io,
   net::{SocketAddrV4, SocketAddrV6},
-  time::Duration,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::{
-  io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufStream},
+  io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufStream},
   net::{self, TcpStream},
-  sync::mpsc,
-  time::Instant,
 };
 use url::Url;
 
-#[derive(Debug)]
-enum Protocol {
-  Binary,
-  Text,
-}
-
-#[derive(Debug)]
-pub struct Connection {
+pub struct BinaryConnection {
   stream: BufStream<TcpStream>,
-  protocol: Protocol,
 }
 
-impl Connection {
+impl BinaryConnection {
   pub async fn connect(url: Url) -> io::Result<Self> {
     assert_eq!("tcp", url.scheme()); // only support tcp for now
 
     let port = url.port().unwrap_or(11211);
-    let params = url.query_pairs().collect::<BTreeMap<_, _>>();
-    let protocol = match params.get("protocol").map(|v| v.as_ref()) {
-      Some("text") => Ok(Protocol::Text),
-      Some("binary") | None => Ok(Protocol::Binary),
-      Some(invalid) => Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("protocol '{invalid}' is invalid"),
-      )),
-    }?;
-
     let addr = match url.host() {
       Some(url::Host::Domain(domain)) => net::lookup_host(format!("{}:{}", domain, port))
         .await
@@ -57,337 +35,606 @@ impl Connection {
     let stream = TcpStream::connect(addr).await?;
     let stream = BufStream::new(stream);
 
-    Ok(Self { stream, protocol })
+    Ok(Self { stream })
   }
 
   pub async fn close(mut self) -> io::Result<()> {
     self.stream.shutdown().await
   }
 
-  pub async fn get(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn get(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::Get(KeyCommandRef { key: k.into() }))
+      .write_key_command(0x00, &KeyCommandRef { key: k.as_ref().into() })
       .await?;
     Ok(())
   }
 
-  pub async fn getq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn getq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::GetQ(KeyCommandRef { key: k.into() }))
+      .write_key_command(0x09, &KeyCommandRef { key: k.as_ref().into() })
       .await?;
     Ok(())
   }
 
-  pub async fn getk(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn getk(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::GetK(KeyCommandRef { key: k.into() }))
+      .write_key_command(0x0c, &KeyCommandRef { key: k.as_ref().into() })
       .await?;
     Ok(())
   }
 
-  pub async fn getkq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn getkq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::GetKQ(KeyCommandRef { key: k.into() }))
+      .write_key_command(0x0d, &KeyCommandRef { key: k.as_ref().into() })
       .await?;
     Ok(())
   }
 
-  pub async fn gat(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+  pub async fn gat(&mut self, k: impl AsRef<str>, exptime: u32) -> io::Result<()> {
     self
-      .write_command(&CommandRef::GetAndTouch(TouchCommandRef { key: k.into(), exptime }))
+      .write_touch_command(
+        0x1d,
+        &TouchCommandRef {
+          key: k.as_ref().into(),
+          exptime,
+        },
+      )
       .await?;
     Ok(())
   }
 
-  pub async fn gatq(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+  pub async fn gatq(&mut self, k: impl AsRef<str>, exptime: u32) -> io::Result<()> {
     self
-      .write_command(&CommandRef::GetAndTouchQ(TouchCommandRef { key: k.into(), exptime }))
+      .write_touch_command(
+        0x1e,
+        &TouchCommandRef {
+          key: k.as_ref().into(),
+          exptime,
+        },
+      )
       .await?;
     Ok(())
   }
 
-  pub async fn set(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+  pub async fn set(
+    &mut self,
+    k: impl AsRef<str>,
+    v: impl AsRef<[u8]>,
+    flags: u32,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
     self
-      .write_command(&CommandRef::Set(SetCommandRef {
-        key: k.into(),
-        value: v.into(),
-        exptime: 0,
-        flags: 0,
-        cas: None,
-      }))
+      .write_set_command(
+        0x01,
+        &SetCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+          flags,
+          exptime,
+          cas,
+        },
+      )
+      .await?;
+    self.read_empty_response().await
+  }
+
+  pub async fn setq(
+    &mut self,
+    k: impl AsRef<str>,
+    v: impl AsRef<[u8]>,
+    flags: u32,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
+    self
+      .write_set_command(
+        0x11,
+        &SetCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+          flags,
+          exptime,
+          cas,
+        },
+      )
       .await
   }
 
-  pub async fn setq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+  pub async fn add(
+    &mut self,
+    k: impl AsRef<str>,
+    v: impl AsRef<[u8]>,
+    flags: u32,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
     self
-      .write_command(&CommandRef::SetQ(SetCommandRef {
-        key: k.into(),
-        value: v.into(),
-        exptime: 0,
-        flags: 0,
-        cas: None,
-      }))
+      .write_set_command(
+        0x02,
+        &SetCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+          flags,
+          exptime,
+          cas,
+        },
+      )
+      .await?;
+    self.read_empty_response().await
+  }
+
+  pub async fn addq(
+    &mut self,
+    k: impl AsRef<str>,
+    v: impl AsRef<[u8]>,
+    flags: u32,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
+    self
+      .write_set_command(
+        0x12,
+        &SetCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+          flags,
+          exptime,
+          cas,
+        },
+      )
       .await
   }
 
-  pub async fn add(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+  pub async fn replace(
+    &mut self,
+    k: impl AsRef<str>,
+    v: impl AsRef<[u8]>,
+    flags: u32,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
     self
-      .write_command(&CommandRef::Add(SetCommandRef {
-        key: k.into(),
-        value: v.into(),
-        exptime: 0,
-        flags: 0,
-        cas: None,
-      }))
+      .write_set_command(
+        0x03,
+        &SetCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+          flags,
+          exptime,
+          cas,
+        },
+      )
+      .await?;
+    self.read_empty_response().await
+  }
+
+  pub async fn replaceq(
+    &mut self,
+    k: impl AsRef<str>,
+    v: impl AsRef<[u8]>,
+    flags: u32,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
+    self
+      .write_set_command(
+        0x13,
+        &SetCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+          flags,
+          exptime,
+          cas,
+        },
+      )
       .await
   }
 
-  pub async fn addq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
+  pub async fn append(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::AddQ(SetCommandRef {
-        key: k.into(),
-        value: v.into(),
-        exptime: 0,
-        flags: 0,
-        cas: None,
-      }))
-      .await
-  }
-
-  pub async fn replace(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
-    self
-      .write_command(&CommandRef::Replace(SetCommandRef {
-        key: k.into(),
-        value: v.into(),
-        exptime: 0,
-        flags: 0,
-        cas: None,
-      }))
-      .await
-  }
-
-  pub async fn replaceq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
-    self
-      .write_command(&CommandRef::ReplaceQ(SetCommandRef {
-        key: k.into(),
-        value: v.into(),
-        exptime: 0,
-        flags: 0,
-        cas: None,
-      }))
-      .await
-  }
-
-  pub async fn append(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
-    self
-      .write_command(&CommandRef::Append(AppendPrependCommandRef {
-        key: k.into(),
-        value: v.into(),
-      }))
-      .await
-  }
-
-  pub async fn appendq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
-    self
-      .write_command(&CommandRef::AppendQ(AppendPrependCommandRef {
-        key: k.into(),
-        value: v.into(),
-      }))
-      .await
-  }
-
-  pub async fn prepend(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
-    self
-      .write_command(&CommandRef::Prepend(AppendPrependCommandRef {
-        key: k.into(),
-        value: v.into(),
-      }))
-      .await
-  }
-
-  pub async fn prependq(&mut self, k: impl Into<Cow<'_, str>>, v: impl Into<Cow<'_, [u8]>>) -> io::Result<()> {
-    self
-      .write_command(&CommandRef::PrependQ(AppendPrependCommandRef {
-        key: k.into(),
-        value: v.into(),
-      }))
-      .await
-  }
-
-  pub async fn delete(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
-    self
-      .write_command(&CommandRef::Delete(KeyCommandRef { key: k.into() }))
+      .write_append_prepend_command(
+        0x0e,
+        &AppendPrependCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+        },
+      )
       .await?;
     Ok(())
   }
 
-  pub async fn deleteq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn appendq(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::DeleteQ(KeyCommandRef { key: k.into() }))
+      .write_append_prepend_command(
+        0x19,
+        &AppendPrependCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+        },
+      )
       .await?;
     Ok(())
   }
 
-  pub async fn incr(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn prepend(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::Incr(IncrDecrCommandRef {
-        key: k.into(),
-        delta: 1,
-        init: 0,
-        exptime: 0,
-      }))
+      .write_append_prepend_command(
+        0x0f,
+        &AppendPrependCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+        },
+      )
       .await?;
     Ok(())
   }
 
-  pub async fn incrq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn prependq(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::IncrQ(IncrDecrCommandRef {
-        key: k.into(),
-        delta: 1,
-        init: 0,
-        exptime: 0,
-      }))
+      .write_append_prepend_command(
+        0x1a,
+        &AppendPrependCommandRef {
+          key: k.as_ref().into(),
+          value: v.as_ref().into(),
+        },
+      )
       .await?;
     Ok(())
   }
 
-  pub async fn decr(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn delete(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::Decr(IncrDecrCommandRef {
-        key: k.into(),
-        delta: 1,
-        init: 0,
-        exptime: 0,
-      }))
+      .write_key_command(0x04, &KeyCommandRef { key: k.as_ref().into() })
       .await?;
     Ok(())
   }
 
-  pub async fn decrq(&mut self, k: impl Into<Cow<'_, str>>) -> io::Result<()> {
+  pub async fn deleteq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::DecrQ(IncrDecrCommandRef {
-        key: k.into(),
-        delta: 1,
-        init: 0,
-        exptime: 0,
-      }))
+      .write_key_command(0x14, &KeyCommandRef { key: k.as_ref().into() })
       .await?;
     Ok(())
   }
 
-  pub async fn touch(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+  pub async fn incr(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::Touch(TouchCommandRef { key: k.into(), exptime }))
+      .write_incr_decr_command(
+        0x05,
+        &IncrDecrCommandRef {
+          key: k.as_ref().into(),
+          delta: 1,
+          init: 0,
+          exptime: 0,
+        },
+      )
       .await?;
     Ok(())
   }
 
-  pub async fn touchq(&mut self, k: impl Into<Cow<'_, str>>, exptime: u32) -> io::Result<()> {
+  pub async fn incrq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
     self
-      .write_command(&CommandRef::TouchQ(TouchCommandRef { key: k.into(), exptime }))
+      .write_incr_decr_command(
+        0x15,
+        &IncrDecrCommandRef {
+          key: k.as_ref().into(),
+          delta: 1,
+          init: 0,
+          exptime: 0,
+        },
+      )
+      .await?;
+    Ok(())
+  }
+
+  pub async fn decr(&mut self, k: impl AsRef<str>) -> io::Result<()> {
+    self
+      .write_incr_decr_command(
+        0x06,
+        &IncrDecrCommandRef {
+          key: k.as_ref().into(),
+          delta: 1,
+          init: 0,
+          exptime: 0,
+        },
+      )
+      .await?;
+    Ok(())
+  }
+
+  pub async fn decrq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
+    self
+      .write_incr_decr_command(
+        0x16,
+        &IncrDecrCommandRef {
+          key: k.as_ref().into(),
+          delta: 1,
+          init: 0,
+          exptime: 0,
+        },
+      )
+      .await?;
+    Ok(())
+  }
+
+  pub async fn touch(&mut self, k: impl AsRef<str>, exptime: u32) -> io::Result<()> {
+    self
+      .write_touch_command(
+        0x1c,
+        &TouchCommandRef {
+          key: k.as_ref().into(),
+          exptime,
+        },
+      )
       .await?;
     Ok(())
   }
 
   pub async fn flush(&mut self) -> io::Result<()> {
-    self.write_command(&CommandRef::Flush).await?;
-    Ok(())
+    self.write_simple_command(0x08).await?;
+    self.read_response_header().await.map(|_h| ())
   }
 
   pub async fn flushq(&mut self) -> io::Result<()> {
-    self.write_command(&CommandRef::FlushQ).await?;
-    Ok(())
+    self.write_simple_command(0x18).await
   }
 
-  pub async fn version(&mut self) -> io::Result<()> {
-    self.write_command(&CommandRef::Version).await?;
-    Ok(())
+  pub async fn version(&mut self) -> io::Result<String> {
+    self.write_simple_command(0x0b).await?;
+    let header = self.read_response_header().await?;
+    io_assert(header.key_len == 0, "key_len != 0")?;
+    io_assert(header.extras_len == 0, "extras_len != 0")?;
+    io_assert(header.body_len > 0, "body_len == 0")?;
+    let mut version = Vec::with_capacity(header.body_len);
+    self.stream.read_buf(&mut version).await?;
+    String::from_utf8(version).map_err(|_err| io::Error::new(io::ErrorKind::InvalidData, "utf8 error"))
   }
 
-  pub async fn stats(&mut self) -> io::Result<()> {
-    self.write_command(&CommandRef::Stats).await?;
-    Ok(())
+  pub async fn stats(&mut self) -> io::Result<BTreeMap<String, Vec<u8>>> {
+    self.write_simple_command(0x10).await?;
+    let stats = BTreeMap::new();
+    loop {
+      let header = self.read_response_header().await?;
+      if header.key_len == 0 && header.body_len == 0 {
+        break;
+      }
+    }
+    Ok(stats)
   }
 
   pub async fn quit(&mut self) -> io::Result<()> {
-    self.write_command(&CommandRef::Quit).await?;
-    Ok(())
+    self.write_simple_command(0x07).await?;
+    self.read_empty_response().await
   }
 
   pub async fn quitq(&mut self) -> io::Result<()> {
-    self.write_command(&CommandRef::QuitQ).await?;
-    Ok(())
+    self.write_simple_command(0x17).await
   }
 
   pub async fn noop(&mut self) -> io::Result<()> {
-    self.write_command(&CommandRef::Noop).await?;
+    self.write_simple_command(0x0a).await?;
+    self.read_empty_response().await
+  }
+
+  async fn write_request_header(&mut self, h: &Header) -> io::Result<()> {
+    self.stream.write_u8(0x80).await?;
+    self.stream.write_u8(h.op).await?;
+    self.stream.write_u16(h.key_len.try_into().unwrap()).await?;
+    self.stream.write_u8(h.extras_len.try_into().unwrap()).await?;
+    self.stream.write_u8(0x00).await?;
+    self.stream.write_u16(0x0000).await?;
+    self.stream.write_u32(h.body_len.try_into().unwrap()).await?;
+    self.stream.write_u32(h.opaque).await?;
+    self.stream.write_u64(h.cas).await?;
     Ok(())
   }
 
-  async fn write_command(&mut self, command: &CommandRef<'_>) -> io::Result<()> {
-    let buffer = match self.protocol {
-      Protocol::Binary => encode_binary_command(command),
-      Protocol::Text => encode_text_command(command),
-    };
-    let buffer = buffer.map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Failed to encode command"))?;
-    self.stream.write(buffer.as_slice()).await?;
-    self.stream.flush().await?;
+  async fn write_key_command(&mut self, op: u8, cmd: &KeyCommandRef<'_>) -> io::Result<()> {
+    let key_len = cmd.key.len();
+    let body_len = key_len;
+    self
+      .write_request_header(&Header {
+        op,
+        key_len,
+        body_len,
+        ..Default::default()
+      })
+      .await?;
+    self.stream.write(cmd.key.as_bytes()).await?;
+    self.stream.flush().await
+  }
+
+  async fn write_simple_command(&mut self, op: u8) -> io::Result<()> {
+    self
+      .write_request_header(&Header {
+        op,
+        ..Default::default()
+      })
+      .await?;
+    self.stream.flush().await
+  }
+
+  async fn write_set_command(&mut self, op: u8, cmd: &SetCommandRef<'_>) -> io::Result<()> {
+    let key_len = cmd.key.len();
+    let extras_len = 8;
+    let value_len = cmd.value.len();
+    let body_len = key_len + extras_len + value_len;
+    let cas = cmd.cas.unwrap_or_default();
+    self
+      .write_request_header(&Header {
+        op,
+        key_len,
+        extras_len,
+        body_len,
+        cas,
+        ..Default::default()
+      })
+      .await?;
+    self.stream.write_u32(cmd.flags).await?;
+    self.stream.write_u32(cmd.exptime).await?;
+    self.stream.write(cmd.key.as_bytes()).await?;
+    self.stream.write(cmd.value.as_ref()).await?;
+    self.stream.flush().await
+  }
+
+  async fn write_append_prepend_command(&mut self, op: u8, cmd: &AppendPrependCommandRef<'_>) -> io::Result<()> {
+    let key_len = cmd.key.len();
+    let value_len = cmd.value.len();
+    let body_len = key_len + value_len;
+    self
+      .write_request_header(&Header {
+        op,
+        key_len,
+        body_len,
+        ..Default::default()
+      })
+      .await?;
+    self.stream.write(cmd.key.as_bytes()).await?;
+    self.stream.write(cmd.value.as_ref()).await?;
+    self.stream.flush().await
+  }
+
+  async fn write_incr_decr_command(&mut self, op: u8, cmd: &IncrDecrCommandRef<'_>) -> io::Result<()> {
+    let key_len = cmd.key.len();
+    let extras_len = 20;
+    let body_len = key_len + extras_len;
+    self
+      .write_request_header(&Header {
+        op,
+        key_len,
+        extras_len,
+        body_len,
+        ..Default::default()
+      })
+      .await?;
+    self.stream.write_u64(cmd.delta).await?;
+    self.stream.write_u64(cmd.init).await?;
+    self.stream.write_u32(cmd.exptime).await?;
+    self.stream.write(cmd.key.as_bytes()).await?;
+    self.stream.flush().await
+  }
+
+  async fn write_touch_command(&mut self, op: u8, cmd: &TouchCommandRef<'_>) -> io::Result<()> {
+    let key_len = cmd.key.len();
+    let extras_len = 4;
+    let body_len = key_len + extras_len;
+    self
+      .write_request_header(&Header {
+        op,
+        key_len,
+        extras_len,
+        body_len,
+        ..Default::default()
+      })
+      .await?;
+    self.stream.write_u32(cmd.exptime).await?;
+    self.stream.write(cmd.key.as_bytes()).await?;
+    self.stream.flush().await
+  }
+
+  async fn read_response_header(&mut self) -> io::Result<Header> {
+    let magic = self.stream.read_u8().await?;
+    assert_eq!(0x81, magic);
+    let op = self.stream.read_u8().await?;
+    let key_len = self.stream.read_u16().await?;
+    let key_len = key_len.into();
+    let extras_len = self.stream.read_u8().await?;
+    let extras_len = extras_len.into();
+    let data_type = self.stream.read_u8().await?;
+    let status = self.stream.read_u16().await?;
+    let body_len = self.stream.read_u32().await?;
+    let body_len = body_len.try_into().unwrap();
+    let opaque = self.stream.read_u32().await?;
+    let cas = self.stream.read_u64().await?;
+
+    match status {
+      0x0000 => Ok(Header {
+        op,
+        key_len,
+        extras_len,
+        data_type,
+        status,
+        body_len,
+        opaque,
+        cas,
+      }),
+      code => Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!("failed with server error {code}"),
+      )),
+    }
+  }
+
+  async fn read_empty_response(&mut self) -> io::Result<()> {
+    let header = self.read_response_header().await?;
+    io_assert(header.key_len == 0, "key_len != 0")?;
+    io_assert(header.extras_len == 0, "extras_len != 0")?;
+    io_assert(header.body_len == 0, "body_len != 0")?;
     Ok(())
   }
+}
 
-  async fn read_response(&mut self) -> io::Result<()> {
-    match self.protocol {
-      Protocol::Text => Ok(()),
-      Protocol::Binary => todo!(),
-    }
+fn io_assert(ok: bool, msg: &str) -> io::Result<()> {
+  if ok {
+    Ok(())
+  } else {
+    Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      format!("Failed assertion: {msg}"),
+    ))
   }
 }
+// fn spawn_connection(max_idle: Duration, max_lifetime: Duration, url: Url) -> mpsc::Sender<Command> {
+//   let (sender, mut receiver) = mpsc::channel(1);
+//   tokio::task::spawn(async move {
+//     loop {
+//       match receiver.recv().await {
+//         Some(msg) => {
+//           let mut connection = Connection::connect(url.clone()).await.unwrap();
+//           process_msg(&mut connection, msg).await;
 
-fn spawn_connection(max_idle: Duration, max_lifetime: Duration, url: Url) -> mpsc::Sender<Command> {
-  let (sender, mut receiver) = mpsc::channel(1);
-  tokio::task::spawn(async move {
-    loop {
-      match receiver.recv().await {
-        Some(msg) => {
-          let mut connection = Connection::connect(url.clone()).await.unwrap();
-          process_msg(&mut connection, msg).await;
+//           let idle_deadline = tokio::time::sleep(max_idle);
+//           tokio::pin!(idle_deadline);
 
-          let idle_deadline = tokio::time::sleep(max_idle);
-          tokio::pin!(idle_deadline);
+//           let lifetime_deadline = tokio::time::sleep(max_lifetime);
+//           tokio::pin!(lifetime_deadline);
 
-          let lifetime_deadline = tokio::time::sleep(max_lifetime);
-          tokio::pin!(lifetime_deadline);
+//           loop {
+//             tokio::select! {
+//               _ = &mut idle_deadline => break,
+//               _ = &mut lifetime_deadline => break,
+//               msg = receiver.recv() => {
+//                 idle_deadline.as_mut().reset(Instant::now() + max_idle);
 
-          loop {
-            tokio::select! {
-              _ = &mut idle_deadline => break,
-              _ = &mut lifetime_deadline => break,
-              msg = receiver.recv() => {
-                idle_deadline.as_mut().reset(Instant::now() + max_idle);
+//                 match msg {
+//                   None => break,
+//                   Some(msg) => process_msg(&mut connection, msg).await,
+//                 }
+//               }
+//             }
+//           }
 
-                match msg {
-                  None => break,
-                  Some(msg) => process_msg(&mut connection, msg).await,
-                }
-              }
-            }
-          }
+//           connection.close().await.ok();
+//         }
+//         None => break,
+//       }
+//     }
+//   });
+//   sender
+// }
 
-          connection.close().await.ok();
-        }
-        None => break,
-      }
-    }
-  });
-  sender
+pub struct Connection;
+
+impl Connection {
+  pub async fn connect(_url: Url) -> io::Result<Self> {
+    todo!()
+  }
 }
-
-async fn process_msg(conn: &mut Connection, msg: Command) {}
+// async fn process_msg(conn: &mut Connection, msg: Command) {}
 
 #[derive(Debug, PartialEq)]
 pub struct KeyCommandRef<'a> {
-  key: Cow<'a, str>,
+  key: &'a str,
 }
 
 #[derive(Debug, PartialEq)]
@@ -397,7 +644,7 @@ pub struct KeyCommand {
 
 #[derive(Debug, PartialEq)]
 pub struct TouchCommandRef<'a> {
-  key: Cow<'a, str>,
+  key: &'a str,
   exptime: u32,
 }
 
@@ -409,8 +656,8 @@ pub struct TouchCommand {
 
 #[derive(Debug, PartialEq)]
 pub struct SetCommandRef<'a> {
-  key: Cow<'a, str>,
-  value: Cow<'a, [u8]>,
+  key: &'a str,
+  value: &'a [u8],
   flags: u32,
   exptime: u32,
   cas: Option<u64>,
@@ -427,7 +674,7 @@ pub struct SetCommand {
 
 #[derive(Debug, PartialEq)]
 pub struct IncrDecrCommandRef<'a> {
-  key: Cow<'a, str>,
+  key: &'a str,
   delta: u64,
   init: u64,
   exptime: u32,
@@ -443,8 +690,8 @@ pub struct IncrDecrCommand {
 
 #[derive(Debug, PartialEq)]
 pub struct AppendPrependCommandRef<'a> {
-  key: Cow<'a, str>,
-  value: Cow<'a, [u8]>,
+  key: &'a str,
+  value: &'a [u8],
 }
 
 #[derive(Debug, PartialEq)]
@@ -564,7 +811,7 @@ pub enum Command {
 impl Command {
   pub fn to_command_ref(&self) -> CommandRef<'_> {
     match self {
-      Command::Get(KeyCommand { key }) => CommandRef::Get(KeyCommandRef { key: key.into() }),
+      Command::Get(KeyCommand { key }) => CommandRef::Get(KeyCommandRef { key: key.as_str() }),
       Command::GetQ(_) => todo!(),
       Command::GetK(_) => todo!(),
       Command::GetKQ(_) => todo!(),
@@ -682,7 +929,6 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
       let mut chunks = input.split(" ");
 
       let key = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
-      let key = key.into();
 
       let flags = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
       let flags = flags.parse().map_err(|_| DecodeCommandError::InvalidFormat)?;
@@ -699,7 +945,6 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
         .strip_suffix(b"\r\n")
         .or_else(|| value.strip_suffix(b"\n"))
         .ok_or(DecodeCommandError::UnexpectedEof)?;
-      let value = Cow::from(value);
 
       if value_len != value.len() {
         return Err(DecodeCommandError::InvalidFormat);
@@ -857,23 +1102,21 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<CommandRef, DecodeComma
   let opaque = input.get_u32();
   let cas = input.get_u64();
 
-  let header = RequestHeader {
+  let header = Header {
     op,
     key_len,
     extras_len,
     body_len,
     opaque,
     cas,
+    ..Default::default()
   };
 
   if input.len() != body_len {
     return Err(DecodeCommandError::UnexpectedEof);
   }
 
-  fn decode_key_command<'a>(
-    header: &RequestHeader,
-    mut input: &'a [u8],
-  ) -> Result<KeyCommandRef<'a>, DecodeCommandError> {
+  fn decode_key_command<'a>(header: &Header, mut input: &'a [u8]) -> Result<KeyCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -891,10 +1134,7 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<CommandRef, DecodeComma
     Ok(KeyCommandRef { key })
   }
 
-  fn decode_set_command<'a>(
-    header: &RequestHeader,
-    mut input: &'a [u8],
-  ) -> Result<SetCommandRef<'a>, DecodeCommandError> {
+  fn decode_set_command<'a>(header: &Header, mut input: &'a [u8]) -> Result<SetCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -929,7 +1169,7 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<CommandRef, DecodeComma
   }
 
   fn decode_append_prepend_command<'a>(
-    header: &RequestHeader,
+    header: &Header,
     mut input: &'a [u8],
   ) -> Result<AppendPrependCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
@@ -955,7 +1195,7 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<CommandRef, DecodeComma
   }
 
   fn decode_incr_decr_command<'a>(
-    header: &RequestHeader,
+    header: &Header,
     mut input: &'a [u8],
   ) -> Result<IncrDecrCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
@@ -984,10 +1224,7 @@ pub fn decode_binary_command(mut input: &[u8]) -> Result<CommandRef, DecodeComma
     })
   }
 
-  fn decode_touch_command<'a>(
-    header: &RequestHeader,
-    mut input: &'a [u8],
-  ) -> Result<TouchCommandRef<'a>, DecodeCommandError> {
+  fn decode_touch_command<'a>(header: &Header, mut input: &'a [u8]) -> Result<TouchCommandRef<'a>, DecodeCommandError> {
     let key_len = header.key_len;
     let extras_len = header.extras_len;
     let body_len = header.body_len;
@@ -1083,13 +1320,25 @@ pub enum EncodeCommandError {
 }
 
 pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeCommandError> {
+  fn put_request_header(buffer: &mut Vec<u8>, h: &Header) {
+    buffer.put_u8(0x80);
+    buffer.put_u8(h.op);
+    buffer.put_u16(h.key_len.try_into().unwrap());
+    buffer.put_u8(h.extras_len.try_into().unwrap());
+    buffer.put_u8(h.data_type);
+    buffer.put_u16(h.status);
+    buffer.put_u32(h.body_len.try_into().unwrap());
+    buffer.put_u32(h.opaque);
+    buffer.put_u64(h.cas);
+  }
+
   fn encode_key_command(op: u8, cmd: &KeyCommandRef) -> Vec<u8> {
     let mut buffer = Vec::new();
     let key_len = cmd.key.len();
     let body_len = key_len;
     put_request_header(
       &mut buffer,
-      &RequestHeader {
+      &Header {
         op,
         key_len,
         body_len,
@@ -1104,7 +1353,7 @@ pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComm
     let mut buffer = Vec::new();
     put_request_header(
       &mut buffer,
-      &RequestHeader {
+      &Header {
         op,
         ..Default::default()
       },
@@ -1121,7 +1370,7 @@ pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComm
     let cas = cmd.cas.unwrap_or_default();
     put_request_header(
       &mut buffer,
-      &RequestHeader {
+      &Header {
         op,
         key_len,
         extras_len,
@@ -1144,7 +1393,7 @@ pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComm
     let body_len = key_len + value_len;
     put_request_header(
       &mut buffer,
-      &RequestHeader {
+      &Header {
         op,
         key_len,
         body_len,
@@ -1163,7 +1412,7 @@ pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComm
     let body_len = key_len + extras_len;
     put_request_header(
       &mut buffer,
-      &RequestHeader {
+      &Header {
         op,
         key_len,
         extras_len,
@@ -1185,7 +1434,7 @@ pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComm
     let body_len = key_len + extras_len;
     put_request_header(
       &mut buffer,
-      &RequestHeader {
+      &Header {
         op,
         key_len,
         extras_len,
@@ -1312,25 +1561,15 @@ pub fn encode_text_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComman
 }
 
 #[derive(Debug, Default)]
-struct RequestHeader {
+struct Header {
   op: u8,
   key_len: usize,
   extras_len: usize,
+  data_type: u8,
+  status: u16,
   body_len: usize,
   opaque: u32,
   cas: u64,
-}
-
-fn put_request_header(buffer: &mut Vec<u8>, h: &RequestHeader) {
-  buffer.put_u8(0x80);
-  buffer.put_u8(h.op);
-  buffer.put_u16(h.key_len.try_into().unwrap());
-  buffer.put_u8(h.extras_len.try_into().unwrap());
-  buffer.put_u8(0x00);
-  buffer.put_u16(0x0000);
-  buffer.put_u32(h.body_len.try_into().unwrap());
-  buffer.put_u32(h.opaque);
-  buffer.put_u64(h.cas);
 }
 
 #[cfg(test)]
@@ -1430,7 +1669,7 @@ mod tests {
         b"set foo 123 321 3\r\nbar\r\n",
         Ok(vec![CommandRef::Set(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
@@ -1440,7 +1679,7 @@ mod tests {
         b"set foo 123 321 0\r\n\r\n",
         Ok(vec![CommandRef::Set(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b""),
+          value: b"",
           flags: 123,
           exptime: 321,
           cas: None,
@@ -1450,7 +1689,7 @@ mod tests {
         b"set foo 123 321 3 noreply\r\nbar\r\n",
         Ok(vec![CommandRef::SetQ(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
@@ -1463,7 +1702,7 @@ mod tests {
         b"add foo 123 321 3\r\nbar\r\n",
         Ok(vec![CommandRef::Add(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
@@ -1473,7 +1712,7 @@ mod tests {
         b"add foo 123 321 3 noreply\r\nbar\r\n",
         Ok(vec![CommandRef::AddQ(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
@@ -1483,7 +1722,7 @@ mod tests {
         b"replace foo 123 321 3\r\nbar\r\n",
         Ok(vec![CommandRef::Replace(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
@@ -1493,7 +1732,7 @@ mod tests {
         b"replace foo 123 321 3 noreply\r\nbar\r\n",
         Ok(vec![CommandRef::ReplaceQ(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
@@ -1503,35 +1742,35 @@ mod tests {
         b"append foo 123 321 3\r\nbar\r\n",
         Ok(vec![CommandRef::Append(AppendPrependCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
         })]),
       ),
       (
         b"append foo 123 321 3 noreply\r\nbar\r\n",
         Ok(vec![CommandRef::AppendQ(AppendPrependCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
         })]),
       ),
       (
         b"prepend foo 123 321 3\r\nbar\r\n",
         Ok(vec![CommandRef::Prepend(AppendPrependCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
         })]),
       ),
       (
         b"prepend foo 123 321 3 noreply\r\nbar\r\n",
         Ok(vec![CommandRef::PrependQ(AppendPrependCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
         })]),
       ),
       (
         b"cas foo 123 321 3 567\r\nbar\r\n",
         Ok(vec![CommandRef::Set(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: Some(567),
@@ -1541,7 +1780,7 @@ mod tests {
         b"cas foo 123 321 0 567\r\n\r\n",
         Ok(vec![CommandRef::Set(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b""),
+          value: b"",
           flags: 123,
           exptime: 321,
           cas: Some(567),
@@ -1551,7 +1790,7 @@ mod tests {
         b"cas foo 123 321 3 567 noreply\r\nbar\r\n",
         Ok(vec![CommandRef::SetQ(SetCommandRef {
           key: "foo".into(),
-          value: Cow::Borrowed(b"bar"),
+          value: b"bar",
           flags: 123,
           exptime: 321,
           cas: Some(567),
@@ -1579,72 +1818,72 @@ mod tests {
       }),
       CommandRef::Set(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::SetQ(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::Add(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::AddQ(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::Replace(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::ReplaceQ(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::Append(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::AppendQ(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::Prepend(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::PrependQ(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::Set(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: Some(456),
       }),
       CommandRef::SetQ(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: Some(456),
@@ -1691,61 +1930,61 @@ mod tests {
       CommandRef::Delete(KeyCommandRef { key: "foo".into() }),
       CommandRef::Set(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::SetQ(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::Add(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::AddQ(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::Replace(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::ReplaceQ(SetCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
         flags: 123,
         exptime: 321,
         cas: None,
       }),
       CommandRef::Append(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::AppendQ(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::Prepend(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::PrependQ(AppendPrependCommandRef {
         key: "foo".into(),
-        value: Cow::Borrowed(b"bar"),
+        value: b"bar",
       }),
       CommandRef::Incr(IncrDecrCommandRef {
         key: "foo".into(),

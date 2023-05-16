@@ -1,10 +1,14 @@
 use std::io;
 
-use kvp::memcached::Connection;
+use kvp::memcached::{BinaryConnection, Connection};
 
 #[tokio::test]
 async fn test_memcached() {
-  let mut conn = setup_connection().await.unwrap();
+  let mut conn = BinaryConnection::connect("tcp://localhost:11211".parse().unwrap())
+    .await
+    .unwrap();
+
+  conn.close().await.unwrap();
 }
 
 async fn setup_connection() -> io::Result<Connection> {
