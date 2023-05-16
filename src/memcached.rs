@@ -43,30 +43,22 @@ impl BinaryConnection {
   }
 
   pub async fn get(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_key_command(0x00, &KeyCommandRef { key: k.as_ref() })
-      .await?;
+    self.write_key_command(0x00, &KeyCommandRef { key: k.as_ref() }).await?;
     Ok(())
   }
 
   pub async fn getq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_key_command(0x09, &KeyCommandRef { key: k.as_ref() })
-      .await?;
+    self.write_key_command(0x09, &KeyCommandRef { key: k.as_ref() }).await?;
     Ok(())
   }
 
   pub async fn getk(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_key_command(0x0c, &KeyCommandRef { key: k.as_ref() })
-      .await?;
+    self.write_key_command(0x0c, &KeyCommandRef { key: k.as_ref() }).await?;
     Ok(())
   }
 
   pub async fn getkq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_key_command(0x0d, &KeyCommandRef { key: k.as_ref() })
-      .await?;
+    self.write_key_command(0x0d, &KeyCommandRef { key: k.as_ref() }).await?;
     Ok(())
   }
 
@@ -284,16 +276,12 @@ impl BinaryConnection {
   }
 
   pub async fn delete(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_key_command(0x04, &KeyCommandRef { key: k.as_ref() })
-      .await?;
+    self.write_key_command(0x04, &KeyCommandRef { key: k.as_ref() }).await?;
     Ok(())
   }
 
   pub async fn deleteq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_key_command(0x14, &KeyCommandRef { key: k.as_ref() })
-      .await?;
+    self.write_key_command(0x14, &KeyCommandRef { key: k.as_ref() }).await?;
     Ok(())
   }
 
@@ -584,44 +572,6 @@ fn io_assert(ok: bool, msg: &str) -> io::Result<()> {
     ))
   }
 }
-// fn spawn_connection(max_idle: Duration, max_lifetime: Duration, url: Url) -> mpsc::Sender<Command> {
-//   let (sender, mut receiver) = mpsc::channel(1);
-//   tokio::task::spawn(async move {
-//     loop {
-//       match receiver.recv().await {
-//         Some(msg) => {
-//           let mut connection = Connection::connect(url.clone()).await.unwrap();
-//           process_msg(&mut connection, msg).await;
-
-//           let idle_deadline = tokio::time::sleep(max_idle);
-//           tokio::pin!(idle_deadline);
-
-//           let lifetime_deadline = tokio::time::sleep(max_lifetime);
-//           tokio::pin!(lifetime_deadline);
-
-//           loop {
-//             tokio::select! {
-//               _ = &mut idle_deadline => break,
-//               _ = &mut lifetime_deadline => break,
-//               msg = receiver.recv() => {
-//                 idle_deadline.as_mut().reset(Instant::now() + max_idle);
-
-//                 match msg {
-//                   None => break,
-//                   Some(msg) => process_msg(&mut connection, msg).await,
-//                 }
-//               }
-//             }
-//           }
-
-//           connection.close().await.ok();
-//         }
-//         None => break,
-//       }
-//     }
-//   });
-//   sender
-// }
 
 pub struct Connection;
 
@@ -737,7 +687,7 @@ pub enum CommandRef<'a> {
 
 impl<'a> CommandRef<'a> {
   pub fn to_command(&self) -> Command {
-    match self {
+    match *self {
       CommandRef::Get(KeyCommandRef { key }) => Command::Get(KeyCommand { key: key.to_string() }),
       CommandRef::GetQ(KeyCommandRef { key }) => Command::GetQ(KeyCommand { key: key.to_string() }),
       CommandRef::GetK(_) => todo!(),
@@ -812,36 +762,172 @@ impl Command {
   pub fn to_command_ref(&self) -> CommandRef<'_> {
     match self {
       Command::Get(KeyCommand { key }) => CommandRef::Get(KeyCommandRef { key: key.as_str() }),
-      Command::GetQ(_) => todo!(),
-      Command::GetK(_) => todo!(),
-      Command::GetKQ(_) => todo!(),
-      Command::GetAndTouch(_) => todo!(),
-      Command::GetAndTouchQ(_) => todo!(),
-      Command::Set(_) => todo!(),
-      Command::SetQ(_) => todo!(),
-      Command::Add(_) => todo!(),
-      Command::AddQ(_) => todo!(),
-      Command::Replace(_) => todo!(),
-      Command::ReplaceQ(_) => todo!(),
-      Command::Append(_) => todo!(),
-      Command::AppendQ(_) => todo!(),
-      Command::Prepend(_) => todo!(),
-      Command::PrependQ(_) => todo!(),
-      Command::Delete(_) => todo!(),
-      Command::DeleteQ(_) => todo!(),
-      Command::Incr(_) => todo!(),
-      Command::IncrQ(_) => todo!(),
-      Command::Decr(_) => todo!(),
-      Command::DecrQ(_) => todo!(),
-      Command::Touch(_) => todo!(),
-      Command::TouchQ(_) => todo!(),
-      Command::Flush => todo!(),
-      Command::FlushQ => todo!(),
-      Command::Version => todo!(),
-      Command::Stats => todo!(),
-      Command::Quit => todo!(),
-      Command::QuitQ => todo!(),
-      Command::Noop => todo!(),
+      Command::GetQ(KeyCommand { key }) => CommandRef::GetQ(KeyCommandRef { key: key.as_str() }),
+      Command::GetK(KeyCommand { key }) => CommandRef::GetK(KeyCommandRef { key: key.as_str() }),
+      Command::GetKQ(KeyCommand { key }) => CommandRef::GetKQ(KeyCommandRef { key: key.as_str() }),
+      Command::GetAndTouch(TouchCommand { key, exptime }) => CommandRef::GetAndTouch(TouchCommandRef {
+        key: key.as_str(),
+        exptime: *exptime,
+      }),
+      Command::GetAndTouchQ(TouchCommand { key, exptime }) => CommandRef::GetAndTouchQ(TouchCommandRef {
+        key: key.as_str(),
+        exptime: *exptime,
+      }),
+      Command::Set(SetCommand {
+        key,
+        value,
+        flags,
+        exptime,
+        cas,
+      }) => CommandRef::Set(SetCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+        flags: *flags,
+        exptime: *exptime,
+        cas: cas.clone(),
+      }),
+      Command::SetQ(SetCommand {
+        key,
+        value,
+        flags,
+        exptime,
+        cas,
+      }) => CommandRef::SetQ(SetCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+        flags: *flags,
+        exptime: *exptime,
+        cas: cas.clone(),
+      }),
+      Command::Add(SetCommand {
+        key,
+        value,
+        flags,
+        exptime,
+        cas,
+      }) => CommandRef::Add(SetCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+        flags: *flags,
+        exptime: *exptime,
+        cas: cas.clone(),
+      }),
+      Command::AddQ(SetCommand {
+        key,
+        value,
+        flags,
+        exptime,
+        cas,
+      }) => CommandRef::AddQ(SetCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+        flags: *flags,
+        exptime: *exptime,
+        cas: cas.clone(),
+      }),
+      Command::Replace(SetCommand {
+        key,
+        value,
+        flags,
+        exptime,
+        cas,
+      }) => CommandRef::Replace(SetCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+        flags: *flags,
+        exptime: *exptime,
+        cas: cas.clone(),
+      }),
+      Command::ReplaceQ(SetCommand {
+        key,
+        value,
+        flags,
+        exptime,
+        cas,
+      }) => CommandRef::ReplaceQ(SetCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+        flags: *flags,
+        exptime: *exptime,
+        cas: cas.clone(),
+      }),
+      Command::Append(AppendPrependCommand { key, value }) => CommandRef::Append(AppendPrependCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+      }),
+      Command::AppendQ(AppendPrependCommand { key, value }) => CommandRef::AppendQ(AppendPrependCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+      }),
+      Command::Prepend(AppendPrependCommand { key, value }) => CommandRef::Prepend(AppendPrependCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+      }),
+      Command::PrependQ(AppendPrependCommand { key, value }) => CommandRef::PrependQ(AppendPrependCommandRef {
+        key: key.as_str(),
+        value: value.as_slice(),
+      }),
+      Command::Delete(KeyCommand { key }) => CommandRef::Delete(KeyCommandRef { key: key.as_str() }),
+      Command::DeleteQ(KeyCommand { key }) => CommandRef::Delete(KeyCommandRef { key: key.as_str() }),
+      Command::Incr(IncrDecrCommand {
+        key,
+        delta,
+        init,
+        exptime,
+      }) => CommandRef::Incr(IncrDecrCommandRef {
+        key: key.as_str(),
+        delta: *delta,
+        init: *init,
+        exptime: *exptime,
+      }),
+      Command::IncrQ(IncrDecrCommand {
+        key,
+        delta,
+        init,
+        exptime,
+      }) => CommandRef::IncrQ(IncrDecrCommandRef {
+        key: key.as_str(),
+        delta: *delta,
+        init: *init,
+        exptime: *exptime,
+      }),
+      Command::Decr(IncrDecrCommand {
+        key,
+        delta,
+        init,
+        exptime,
+      }) => CommandRef::Decr(IncrDecrCommandRef {
+        key: key.as_str(),
+        delta: *delta,
+        init: *init,
+        exptime: *exptime,
+      }),
+      Command::DecrQ(IncrDecrCommand {
+        key,
+        delta,
+        init,
+        exptime,
+      }) => CommandRef::DecrQ(IncrDecrCommandRef {
+        key: key.as_str(),
+        delta: *delta,
+        init: *init,
+        exptime: *exptime,
+      }),
+      Command::Touch(TouchCommand { key, exptime }) => CommandRef::Touch(TouchCommandRef {
+        key: key.as_str(),
+        exptime: *exptime,
+      }),
+      Command::TouchQ(TouchCommand { key, exptime }) => CommandRef::TouchQ(TouchCommandRef {
+        key: key.as_str(),
+        exptime: *exptime,
+      }),
+      Command::Flush => CommandRef::Flush,
+      Command::FlushQ => CommandRef::FlushQ,
+      Command::Version => CommandRef::Version,
+      Command::Stats => CommandRef::Stats,
+      Command::Quit => CommandRef::Quit,
+      Command::QuitQ => CommandRef::QuitQ,
+      Command::Noop => CommandRef::Noop,
     }
   }
 }
@@ -1575,8 +1661,6 @@ struct Header {
 #[cfg(test)]
 mod tests {
 
-  
-
   use super::{
     decode_binary_command, decode_text_command, encode_binary_command, encode_text_command, AppendPrependCommandRef,
     CommandRef, DecodeCommandError, IncrDecrCommandRef, KeyCommandRef, SetCommandRef, TouchCommandRef,
@@ -1585,10 +1669,7 @@ mod tests {
   #[test]
   fn test_decode_text_command() {
     let tests: &[(&[u8], _)] = &[
-      (
-        b"get foo\r\n",
-        Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo" })]),
-      ),
+      (b"get foo\r\n", Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo" })])),
       (
         b"get foo bar\r\n",
         Ok(vec![
@@ -1596,10 +1677,7 @@ mod tests {
           CommandRef::Get(KeyCommandRef { key: "bar" }),
         ]),
       ),
-      (
-        b"gets foo\r\n",
-        Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo" })]),
-      ),
+      (b"gets foo\r\n", Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo" })])),
       (
         b"gets foo bar\r\n",
         Ok(vec![
