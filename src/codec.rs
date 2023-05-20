@@ -1,663 +1,49 @@
-use std::{
-  collections::BTreeMap,
-  io,
-  net::{SocketAddrV4, SocketAddrV6},
-};
-
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::{
-  io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufStream},
-  net::{self, TcpStream},
-};
-use url::Url;
-
-pub struct BinaryConnection {
-  stream: BufStream<TcpStream>,
-}
-
-impl BinaryConnection {
-  pub async fn connect(url: Url) -> io::Result<Self> {
-    assert_eq!("tcp", url.scheme()); // only support tcp for now
-
-    let port = url.port().unwrap_or(11211);
-    let addr = match url.host() {
-      Some(url::Host::Domain(domain)) => net::lookup_host(format!("{}:{}", domain, port))
-        .await
-        .and_then(|mut v| {
-          v.next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::ConnectionReset, "unable to find host"))
-        })?,
-      Some(url::Host::Ipv4(ip)) => SocketAddrV4::new(ip, port).into(),
-      Some(url::Host::Ipv6(ip)) => SocketAddrV6::new(ip, port, 0, 0).into(),
-      None => format!("[::]:{port}").parse().unwrap(),
-    };
-
-    let stream = TcpStream::connect(addr).await?;
-    let stream = BufStream::new(stream);
-
-    Ok(Self { stream })
-  }
-
-  pub async fn close(mut self) -> io::Result<()> {
-    self.stream.shutdown().await
-  }
-
-  pub async fn get(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self.write_key_command(0x00, &KeyCommandRef { key: k.as_ref() }).await?;
-    Ok(())
-  }
-
-  pub async fn getq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self.write_key_command(0x09, &KeyCommandRef { key: k.as_ref() }).await?;
-    Ok(())
-  }
-
-  pub async fn getk(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self.write_key_command(0x0c, &KeyCommandRef { key: k.as_ref() }).await?;
-    Ok(())
-  }
-
-  pub async fn getkq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self.write_key_command(0x0d, &KeyCommandRef { key: k.as_ref() }).await?;
-    Ok(())
-  }
-
-  pub async fn gat(&mut self, k: impl AsRef<str>, exptime: u32) -> io::Result<()> {
-    self
-      .write_touch_command(
-        0x1d,
-        &TouchCommandRef {
-          key: k.as_ref(),
-          exptime,
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn gatq(&mut self, k: impl AsRef<str>, exptime: u32) -> io::Result<()> {
-    self
-      .write_touch_command(
-        0x1e,
-        &TouchCommandRef {
-          key: k.as_ref(),
-          exptime,
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set(
-    &mut self,
-    k: impl AsRef<str>,
-    v: impl AsRef<[u8]>,
-    flags: u32,
-    exptime: u32,
-    cas: Option<u64>,
-  ) -> io::Result<()> {
-    self
-      .write_set_command(
-        0x01,
-        &SetCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-          flags,
-          exptime,
-          cas,
-        },
-      )
-      .await?;
-    self.read_empty_response().await
-  }
-
-  pub async fn setq(
-    &mut self,
-    k: impl AsRef<str>,
-    v: impl AsRef<[u8]>,
-    flags: u32,
-    exptime: u32,
-    cas: Option<u64>,
-  ) -> io::Result<()> {
-    self
-      .write_set_command(
-        0x11,
-        &SetCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-          flags,
-          exptime,
-          cas,
-        },
-      )
-      .await
-  }
-
-  pub async fn add(
-    &mut self,
-    k: impl AsRef<str>,
-    v: impl AsRef<[u8]>,
-    flags: u32,
-    exptime: u32,
-    cas: Option<u64>,
-  ) -> io::Result<()> {
-    self
-      .write_set_command(
-        0x02,
-        &SetCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-          flags,
-          exptime,
-          cas,
-        },
-      )
-      .await?;
-    self.read_empty_response().await
-  }
-
-  pub async fn addq(
-    &mut self,
-    k: impl AsRef<str>,
-    v: impl AsRef<[u8]>,
-    flags: u32,
-    exptime: u32,
-    cas: Option<u64>,
-  ) -> io::Result<()> {
-    self
-      .write_set_command(
-        0x12,
-        &SetCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-          flags,
-          exptime,
-          cas,
-        },
-      )
-      .await
-  }
-
-  pub async fn replace(
-    &mut self,
-    k: impl AsRef<str>,
-    v: impl AsRef<[u8]>,
-    flags: u32,
-    exptime: u32,
-    cas: Option<u64>,
-  ) -> io::Result<()> {
-    self
-      .write_set_command(
-        0x03,
-        &SetCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-          flags,
-          exptime,
-          cas,
-        },
-      )
-      .await?;
-    self.read_empty_response().await
-  }
-
-  pub async fn replaceq(
-    &mut self,
-    k: impl AsRef<str>,
-    v: impl AsRef<[u8]>,
-    flags: u32,
-    exptime: u32,
-    cas: Option<u64>,
-  ) -> io::Result<()> {
-    self
-      .write_set_command(
-        0x13,
-        &SetCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-          flags,
-          exptime,
-          cas,
-        },
-      )
-      .await
-  }
-
-  pub async fn append(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
-    self
-      .write_append_prepend_command(
-        0x0e,
-        &AppendPrependCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn appendq(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
-    self
-      .write_append_prepend_command(
-        0x19,
-        &AppendPrependCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn prepend(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
-    self
-      .write_append_prepend_command(
-        0x0f,
-        &AppendPrependCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn prependq(&mut self, k: impl AsRef<str>, v: impl AsRef<[u8]>) -> io::Result<()> {
-    self
-      .write_append_prepend_command(
-        0x1a,
-        &AppendPrependCommandRef {
-          key: k.as_ref(),
-          value: v.as_ref(),
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn delete(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self.write_key_command(0x04, &KeyCommandRef { key: k.as_ref() }).await?;
-    Ok(())
-  }
-
-  pub async fn deleteq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self.write_key_command(0x14, &KeyCommandRef { key: k.as_ref() }).await?;
-    Ok(())
-  }
-
-  pub async fn incr(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_incr_decr_command(
-        0x05,
-        &IncrDecrCommandRef {
-          key: k.as_ref(),
-          delta: 1,
-          init: 0,
-          exptime: 0,
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn incrq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_incr_decr_command(
-        0x15,
-        &IncrDecrCommandRef {
-          key: k.as_ref(),
-          delta: 1,
-          init: 0,
-          exptime: 0,
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn decr(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_incr_decr_command(
-        0x06,
-        &IncrDecrCommandRef {
-          key: k.as_ref(),
-          delta: 1,
-          init: 0,
-          exptime: 0,
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn decrq(&mut self, k: impl AsRef<str>) -> io::Result<()> {
-    self
-      .write_incr_decr_command(
-        0x16,
-        &IncrDecrCommandRef {
-          key: k.as_ref(),
-          delta: 1,
-          init: 0,
-          exptime: 0,
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn touch(&mut self, k: impl AsRef<str>, exptime: u32) -> io::Result<()> {
-    self
-      .write_touch_command(
-        0x1c,
-        &TouchCommandRef {
-          key: k.as_ref(),
-          exptime,
-        },
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn flush(&mut self) -> io::Result<()> {
-    self.write_simple_command(0x08).await?;
-    self.read_response_header().await.map(|_h| ())
-  }
-
-  pub async fn flushq(&mut self) -> io::Result<()> {
-    self.write_simple_command(0x18).await
-  }
-
-  pub async fn version(&mut self) -> io::Result<String> {
-    self.write_simple_command(0x0b).await?;
-    let header = self.read_response_header().await?;
-    io_assert(header.key_len == 0, "key_len != 0")?;
-    io_assert(header.extras_len == 0, "extras_len != 0")?;
-    io_assert(header.body_len > 0, "body_len == 0")?;
-    let mut version = Vec::with_capacity(header.body_len);
-    self.stream.read_buf(&mut version).await?;
-    String::from_utf8(version).map_err(|_err| io::Error::new(io::ErrorKind::InvalidData, "utf8 error"))
-  }
-
-  pub async fn stats(&mut self) -> io::Result<BTreeMap<String, Vec<u8>>> {
-    self.write_simple_command(0x10).await?;
-    let stats = BTreeMap::new();
-    loop {
-      let header = self.read_response_header().await?;
-      if header.key_len == 0 && header.body_len == 0 {
-        break;
-      }
-    }
-    Ok(stats)
-  }
-
-  pub async fn quit(&mut self) -> io::Result<()> {
-    self.write_simple_command(0x07).await?;
-    self.read_empty_response().await
-  }
-
-  pub async fn quitq(&mut self) -> io::Result<()> {
-    self.write_simple_command(0x17).await
-  }
-
-  pub async fn noop(&mut self) -> io::Result<()> {
-    self.write_simple_command(0x0a).await?;
-    self.read_empty_response().await
-  }
-
-  async fn write_request_header(&mut self, h: &Header) -> io::Result<()> {
-    self.stream.write_u8(0x80).await?;
-    self.stream.write_u8(h.op).await?;
-    self.stream.write_u16(h.key_len.try_into().unwrap()).await?;
-    self.stream.write_u8(h.extras_len.try_into().unwrap()).await?;
-    self.stream.write_u8(0x00).await?;
-    self.stream.write_u16(0x0000).await?;
-    self.stream.write_u32(h.body_len.try_into().unwrap()).await?;
-    self.stream.write_u32(h.opaque).await?;
-    self.stream.write_u64(h.cas).await?;
-    Ok(())
-  }
-
-  async fn write_key_command(&mut self, op: u8, cmd: &KeyCommandRef<'_>) -> io::Result<()> {
-    let key_len = cmd.key.len();
-    let body_len = key_len;
-    self
-      .write_request_header(&Header {
-        op,
-        key_len,
-        body_len,
-        ..Default::default()
-      })
-      .await?;
-    self.stream.write(cmd.key.as_bytes()).await?;
-    self.stream.flush().await
-  }
-
-  async fn write_simple_command(&mut self, op: u8) -> io::Result<()> {
-    self
-      .write_request_header(&Header {
-        op,
-        ..Default::default()
-      })
-      .await?;
-    self.stream.flush().await
-  }
-
-  async fn write_set_command(&mut self, op: u8, cmd: &SetCommandRef<'_>) -> io::Result<()> {
-    let key_len = cmd.key.len();
-    let extras_len = 8;
-    let value_len = cmd.value.len();
-    let body_len = key_len + extras_len + value_len;
-    let cas = cmd.cas.unwrap_or_default();
-    self
-      .write_request_header(&Header {
-        op,
-        key_len,
-        extras_len,
-        body_len,
-        cas,
-        ..Default::default()
-      })
-      .await?;
-    self.stream.write_u32(cmd.flags).await?;
-    self.stream.write_u32(cmd.exptime).await?;
-    self.stream.write(cmd.key.as_bytes()).await?;
-    self.stream.write(cmd.value.as_ref()).await?;
-    self.stream.flush().await
-  }
-
-  async fn write_append_prepend_command(&mut self, op: u8, cmd: &AppendPrependCommandRef<'_>) -> io::Result<()> {
-    let key_len = cmd.key.len();
-    let value_len = cmd.value.len();
-    let body_len = key_len + value_len;
-    self
-      .write_request_header(&Header {
-        op,
-        key_len,
-        body_len,
-        ..Default::default()
-      })
-      .await?;
-    self.stream.write(cmd.key.as_bytes()).await?;
-    self.stream.write(cmd.value.as_ref()).await?;
-    self.stream.flush().await
-  }
-
-  async fn write_incr_decr_command(&mut self, op: u8, cmd: &IncrDecrCommandRef<'_>) -> io::Result<()> {
-    let key_len = cmd.key.len();
-    let extras_len = 20;
-    let body_len = key_len + extras_len;
-    self
-      .write_request_header(&Header {
-        op,
-        key_len,
-        extras_len,
-        body_len,
-        ..Default::default()
-      })
-      .await?;
-    self.stream.write_u64(cmd.delta).await?;
-    self.stream.write_u64(cmd.init).await?;
-    self.stream.write_u32(cmd.exptime).await?;
-    self.stream.write(cmd.key.as_bytes()).await?;
-    self.stream.flush().await
-  }
-
-  async fn write_touch_command(&mut self, op: u8, cmd: &TouchCommandRef<'_>) -> io::Result<()> {
-    let key_len = cmd.key.len();
-    let extras_len = 4;
-    let body_len = key_len + extras_len;
-    self
-      .write_request_header(&Header {
-        op,
-        key_len,
-        extras_len,
-        body_len,
-        ..Default::default()
-      })
-      .await?;
-    self.stream.write_u32(cmd.exptime).await?;
-    self.stream.write(cmd.key.as_bytes()).await?;
-    self.stream.flush().await
-  }
-
-  async fn read_response_header(&mut self) -> io::Result<Header> {
-    let magic = self.stream.read_u8().await?;
-    assert_eq!(0x81, magic);
-    let op = self.stream.read_u8().await?;
-    let key_len = self.stream.read_u16().await?;
-    let key_len = key_len.into();
-    let extras_len = self.stream.read_u8().await?;
-    let extras_len = extras_len.into();
-    let data_type = self.stream.read_u8().await?;
-    let status = self.stream.read_u16().await?;
-    let body_len = self.stream.read_u32().await?;
-    let body_len = body_len.try_into().unwrap();
-    let opaque = self.stream.read_u32().await?;
-    let cas = self.stream.read_u64().await?;
-
-    match status {
-      0x0000 => Ok(Header {
-        op,
-        key_len,
-        extras_len,
-        data_type,
-        status,
-        body_len,
-        opaque,
-        cas,
-      }),
-      code => Err(io::Error::new(
-        io::ErrorKind::Other,
-        format!("failed with server error {code}"),
-      )),
-    }
-  }
-
-  async fn read_empty_response(&mut self) -> io::Result<()> {
-    let header = self.read_response_header().await?;
-    io_assert(header.key_len == 0, "key_len != 0")?;
-    io_assert(header.extras_len == 0, "extras_len != 0")?;
-    io_assert(header.body_len == 0, "body_len != 0")?;
-    Ok(())
-  }
-}
-
-fn io_assert(ok: bool, msg: &str) -> io::Result<()> {
-  if ok {
-    Ok(())
-  } else {
-    Err(io::Error::new(
-      io::ErrorKind::InvalidData,
-      format!("Failed assertion: {msg}"),
-    ))
-  }
-}
-
-pub struct Connection;
-
-impl Connection {
-  pub async fn connect(_url: Url) -> io::Result<Self> {
-    todo!()
-  }
-}
-// async fn process_msg(conn: &mut Connection, msg: Command) {}
+use bytes::{Buf, BufMut};
 
 #[derive(Debug, PartialEq)]
 pub struct KeyCommandRef<'a> {
-  key: &'a str,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct KeyCommand {
-  key: String,
+  pub key: &'a str,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct TouchCommandRef<'a> {
-  key: &'a str,
-  exptime: u32,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct TouchCommand {
-  key: String,
-  exptime: u32,
+  pub key: &'a str,
+  pub exptime: u32,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct SetCommandRef<'a> {
-  key: &'a str,
-  value: &'a [u8],
-  flags: u32,
-  exptime: u32,
-  cas: Option<u64>,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct SetCommand {
-  key: String,
-  value: Vec<u8>,
-  flags: u32,
-  exptime: u32,
-  cas: Option<u64>,
+  pub key: &'a str,
+  pub value: &'a [u8],
+  pub flags: u32,
+  pub exptime: u32,
+  pub cas: Option<u64>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct IncrDecrCommandRef<'a> {
-  key: &'a str,
-  delta: u64,
-  init: u64,
-  exptime: u32,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct IncrDecrCommand {
-  key: String,
-  delta: u64,
-  init: u64,
-  exptime: u32,
+  pub key: &'a str,
+  pub delta: u64,
+  pub init: u64,
+  pub exptime: u32,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct AppendPrependCommandRef<'a> {
-  key: &'a str,
-  value: &'a [u8],
-}
-
-#[derive(Debug, PartialEq)]
-pub struct AppendPrependCommand {
-  key: String,
-  value: Vec<u8>,
+  pub key: &'a str,
+  pub value: &'a [u8],
 }
 
 #[derive(Debug, PartialEq)]
 pub enum CommandRef<'a> {
   Get(KeyCommandRef<'a>),
   GetQ(KeyCommandRef<'a>),
+  GetM { keys: Vec<&'a str> },
   GetK(KeyCommandRef<'a>),
   GetKQ(KeyCommandRef<'a>),
   GetAndTouch(TouchCommandRef<'a>),
   GetAndTouchQ(TouchCommandRef<'a>),
+  GetAndTouchM { keys: Vec<&'a str>, exptime: u32 },
   Set(SetCommandRef<'a>),
   SetQ(SetCommandRef<'a>),
   Add(SetCommandRef<'a>),
@@ -685,251 +71,10 @@ pub enum CommandRef<'a> {
   Noop,
 }
 
-impl<'a> CommandRef<'a> {
-  pub fn to_command(&self) -> Command {
-    match *self {
-      CommandRef::Get(KeyCommandRef { key }) => Command::Get(KeyCommand { key: key.to_string() }),
-      CommandRef::GetQ(KeyCommandRef { key }) => Command::GetQ(KeyCommand { key: key.to_string() }),
-      CommandRef::GetK(_) => todo!(),
-      CommandRef::GetKQ(_) => todo!(),
-      CommandRef::GetAndTouch(_) => todo!(),
-      CommandRef::GetAndTouchQ(_) => todo!(),
-      CommandRef::Set(_) => todo!(),
-      CommandRef::SetQ(_) => todo!(),
-      CommandRef::Add(_) => todo!(),
-      CommandRef::AddQ(_) => todo!(),
-      CommandRef::Replace(_) => todo!(),
-      CommandRef::ReplaceQ(_) => todo!(),
-      CommandRef::Append(_) => todo!(),
-      CommandRef::AppendQ(_) => todo!(),
-      CommandRef::Prepend(_) => todo!(),
-      CommandRef::PrependQ(_) => todo!(),
-      CommandRef::Delete(_) => todo!(),
-      CommandRef::DeleteQ(_) => todo!(),
-      CommandRef::Incr(_) => todo!(),
-      CommandRef::IncrQ(_) => todo!(),
-      CommandRef::Decr(_) => todo!(),
-      CommandRef::DecrQ(_) => todo!(),
-      CommandRef::Touch(_) => todo!(),
-      CommandRef::TouchQ(_) => todo!(),
-      CommandRef::Flush => todo!(),
-      CommandRef::FlushQ => todo!(),
-      CommandRef::Version => todo!(),
-      CommandRef::Stats => todo!(),
-      CommandRef::Quit => todo!(),
-      CommandRef::QuitQ => todo!(),
-      CommandRef::Noop => todo!(),
-    }
-  }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Command {
-  Get(KeyCommand),
-  GetQ(KeyCommand),
-  GetK(KeyCommand),
-  GetKQ(KeyCommand),
-  GetAndTouch(TouchCommand),
-  GetAndTouchQ(TouchCommand),
-  Set(SetCommand),
-  SetQ(SetCommand),
-  Add(SetCommand),
-  AddQ(SetCommand),
-  Replace(SetCommand),
-  ReplaceQ(SetCommand),
-  Append(AppendPrependCommand),
-  AppendQ(AppendPrependCommand),
-  Prepend(AppendPrependCommand),
-  PrependQ(AppendPrependCommand),
-  Delete(KeyCommand),
-  DeleteQ(KeyCommand),
-  Incr(IncrDecrCommand),
-  IncrQ(IncrDecrCommand),
-  Decr(IncrDecrCommand),
-  DecrQ(IncrDecrCommand),
-  Touch(TouchCommand),
-  TouchQ(TouchCommand),
-  Flush,
-  FlushQ,
-  Version,
-  Stats,
-  Quit,
-  QuitQ,
-  Noop,
-}
-
-impl Command {
-  pub fn to_command_ref(&self) -> CommandRef<'_> {
-    match self {
-      Command::Get(KeyCommand { key }) => CommandRef::Get(KeyCommandRef { key: key.as_str() }),
-      Command::GetQ(KeyCommand { key }) => CommandRef::GetQ(KeyCommandRef { key: key.as_str() }),
-      Command::GetK(KeyCommand { key }) => CommandRef::GetK(KeyCommandRef { key: key.as_str() }),
-      Command::GetKQ(KeyCommand { key }) => CommandRef::GetKQ(KeyCommandRef { key: key.as_str() }),
-      Command::GetAndTouch(TouchCommand { key, exptime }) => CommandRef::GetAndTouch(TouchCommandRef {
-        key: key.as_str(),
-        exptime: *exptime,
-      }),
-      Command::GetAndTouchQ(TouchCommand { key, exptime }) => CommandRef::GetAndTouchQ(TouchCommandRef {
-        key: key.as_str(),
-        exptime: *exptime,
-      }),
-      Command::Set(SetCommand {
-        key,
-        value,
-        flags,
-        exptime,
-        cas,
-      }) => CommandRef::Set(SetCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-        flags: *flags,
-        exptime: *exptime,
-        cas: cas.clone(),
-      }),
-      Command::SetQ(SetCommand {
-        key,
-        value,
-        flags,
-        exptime,
-        cas,
-      }) => CommandRef::SetQ(SetCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-        flags: *flags,
-        exptime: *exptime,
-        cas: cas.clone(),
-      }),
-      Command::Add(SetCommand {
-        key,
-        value,
-        flags,
-        exptime,
-        cas,
-      }) => CommandRef::Add(SetCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-        flags: *flags,
-        exptime: *exptime,
-        cas: cas.clone(),
-      }),
-      Command::AddQ(SetCommand {
-        key,
-        value,
-        flags,
-        exptime,
-        cas,
-      }) => CommandRef::AddQ(SetCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-        flags: *flags,
-        exptime: *exptime,
-        cas: cas.clone(),
-      }),
-      Command::Replace(SetCommand {
-        key,
-        value,
-        flags,
-        exptime,
-        cas,
-      }) => CommandRef::Replace(SetCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-        flags: *flags,
-        exptime: *exptime,
-        cas: cas.clone(),
-      }),
-      Command::ReplaceQ(SetCommand {
-        key,
-        value,
-        flags,
-        exptime,
-        cas,
-      }) => CommandRef::ReplaceQ(SetCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-        flags: *flags,
-        exptime: *exptime,
-        cas: cas.clone(),
-      }),
-      Command::Append(AppendPrependCommand { key, value }) => CommandRef::Append(AppendPrependCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-      }),
-      Command::AppendQ(AppendPrependCommand { key, value }) => CommandRef::AppendQ(AppendPrependCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-      }),
-      Command::Prepend(AppendPrependCommand { key, value }) => CommandRef::Prepend(AppendPrependCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-      }),
-      Command::PrependQ(AppendPrependCommand { key, value }) => CommandRef::PrependQ(AppendPrependCommandRef {
-        key: key.as_str(),
-        value: value.as_slice(),
-      }),
-      Command::Delete(KeyCommand { key }) => CommandRef::Delete(KeyCommandRef { key: key.as_str() }),
-      Command::DeleteQ(KeyCommand { key }) => CommandRef::Delete(KeyCommandRef { key: key.as_str() }),
-      Command::Incr(IncrDecrCommand {
-        key,
-        delta,
-        init,
-        exptime,
-      }) => CommandRef::Incr(IncrDecrCommandRef {
-        key: key.as_str(),
-        delta: *delta,
-        init: *init,
-        exptime: *exptime,
-      }),
-      Command::IncrQ(IncrDecrCommand {
-        key,
-        delta,
-        init,
-        exptime,
-      }) => CommandRef::IncrQ(IncrDecrCommandRef {
-        key: key.as_str(),
-        delta: *delta,
-        init: *init,
-        exptime: *exptime,
-      }),
-      Command::Decr(IncrDecrCommand {
-        key,
-        delta,
-        init,
-        exptime,
-      }) => CommandRef::Decr(IncrDecrCommandRef {
-        key: key.as_str(),
-        delta: *delta,
-        init: *init,
-        exptime: *exptime,
-      }),
-      Command::DecrQ(IncrDecrCommand {
-        key,
-        delta,
-        init,
-        exptime,
-      }) => CommandRef::DecrQ(IncrDecrCommandRef {
-        key: key.as_str(),
-        delta: *delta,
-        init: *init,
-        exptime: *exptime,
-      }),
-      Command::Touch(TouchCommand { key, exptime }) => CommandRef::Touch(TouchCommandRef {
-        key: key.as_str(),
-        exptime: *exptime,
-      }),
-      Command::TouchQ(TouchCommand { key, exptime }) => CommandRef::TouchQ(TouchCommandRef {
-        key: key.as_str(),
-        exptime: *exptime,
-      }),
-      Command::Flush => CommandRef::Flush,
-      Command::FlushQ => CommandRef::FlushQ,
-      Command::Version => CommandRef::Version,
-      Command::Stats => CommandRef::Stats,
-      Command::Quit => CommandRef::Quit,
-      Command::QuitQ => CommandRef::QuitQ,
-      Command::Noop => CommandRef::Noop,
-    }
-  }
+#[derive(Debug)]
+pub enum Protocol {
+  Text,
+  Binary,
 }
 
 #[derive(Debug, PartialEq)]
@@ -939,33 +84,15 @@ pub enum DecodeCommandError {
   InvalidCommand,
 }
 
-pub async fn read_command<R>(r: &mut R) -> io::Result<Option<Bytes>>
-where
-  R: AsyncBufRead + Unpin,
-{
-  let mut buffer = BytesMut::new();
-  let b = r.fill_buf().await?;
-  if b.is_empty() {
-    return Ok(None);
-  }
-
-  buffer.extend_from_slice(b);
-
-  let len = b.len();
-  r.consume(len);
-
-  Ok(Some(buffer.freeze()))
-}
-
-pub fn decode_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeCommandError> {
+pub fn decode_command(input: &[u8]) -> Result<(Protocol, CommandRef), DecodeCommandError> {
   match input.first() {
-    Some(0x80) => decode_binary_command(input).map(|v| vec![v]),
-    Some(_) => decode_text_command(input),
+    Some(0x80) => decode_binary_command(input).map(|v| (Protocol::Binary, v)),
+    Some(_) => decode_text_command(input).map(|v: CommandRef| (Protocol::Text, v)),
     None => Err(DecodeCommandError::UnexpectedEof),
   }
 }
 
-pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeCommandError> {
+pub fn decode_text_command(input: &[u8]) -> Result<CommandRef, DecodeCommandError> {
   let mut chunks = input.splitn(2, |v| *v == b' ');
   let command = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
   let input = chunks.next().unwrap_or(&[]);
@@ -982,13 +109,14 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
   match command {
     b"get" | b"gets" => {
       let input = new_line_str(input)?;
-      Ok(
-        input
-          .split(' ')
-          .map(Into::into)
-          .map(|key| CommandRef::Get(KeyCommandRef { key }))
-          .collect(),
-      )
+
+      let keys = input.split(' ').map(Into::into).collect::<Vec<_>>();
+
+      match keys.len() {
+        1 => Ok(CommandRef::Get(KeyCommandRef { key: keys[0] })),
+        len if len > 1 => Ok(CommandRef::GetM { keys }),
+        _ => Err(DecodeCommandError::UnexpectedEof),
+      }
     }
     b"gat" | b"gats" => {
       let input = new_line_str(input)?;
@@ -998,12 +126,13 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
       let exptime = chunks.next().ok_or(DecodeCommandError::UnexpectedEof)?;
       let exptime = exptime.parse().map_err(|_| DecodeCommandError::InvalidFormat)?;
 
-      Ok(
-        chunks
-          .map(Into::into)
-          .map(|key| CommandRef::GetAndTouch(TouchCommandRef { key, exptime }))
-          .collect(),
-      )
+      let keys = chunks.map(Into::into).collect::<Vec<_>>();
+
+      match keys.len() {
+        1 => Ok(CommandRef::GetAndTouch(TouchCommandRef { key: keys[0], exptime })),
+        len if len > 1 => Ok(CommandRef::GetAndTouchM { keys, exptime }),
+        _ => Err(DecodeCommandError::UnexpectedEof),
+      }
     }
 
     b"set" | b"add" | b"replace" | b"cas" | b"append" | b"prepend" => {
@@ -1095,7 +224,7 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
         _ => unreachable!(),
       };
 
-      Ok(vec![cmd])
+      Ok(cmd)
     }
 
     b"delete" => {
@@ -1108,9 +237,9 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
 
       let noreply = chunks.next().filter(|v| *v == "noreply").is_some();
       if noreply {
-        Ok(vec![CommandRef::DeleteQ(KeyCommandRef { key })])
+        Ok(CommandRef::DeleteQ(KeyCommandRef { key }))
       } else {
-        Ok(vec![CommandRef::Delete(KeyCommandRef { key })])
+        Ok(CommandRef::Delete(KeyCommandRef { key }))
       }
     }
     b"incr" | b"decr" => {
@@ -1137,10 +266,10 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
       };
 
       match command {
-        b"incr" if noreply => Ok(vec![CommandRef::IncrQ(cmd)]),
-        b"incr" => Ok(vec![CommandRef::Incr(cmd)]),
-        b"decr" if noreply => Ok(vec![CommandRef::DecrQ(cmd)]),
-        b"decr" => Ok(vec![CommandRef::Decr(cmd)]),
+        b"incr" if noreply => Ok(CommandRef::IncrQ(cmd)),
+        b"incr" => Ok(CommandRef::Incr(cmd)),
+        b"decr" if noreply => Ok(CommandRef::DecrQ(cmd)),
+        b"decr" => Ok(CommandRef::Decr(cmd)),
         _ => unreachable!(),
       }
     }
@@ -1158,15 +287,15 @@ pub fn decode_text_command(input: &[u8]) -> Result<Vec<CommandRef>, DecodeComman
       let noreply = chunks.next().filter(|v| *v == "noreply").is_some();
 
       if noreply {
-        Ok(vec![CommandRef::TouchQ(TouchCommandRef { key, exptime })])
+        Ok(CommandRef::TouchQ(TouchCommandRef { key, exptime }))
       } else {
-        Ok(vec![CommandRef::Touch(TouchCommandRef { key, exptime })])
+        Ok(CommandRef::Touch(TouchCommandRef { key, exptime }))
       }
     }
-    b"flush_all\r\n" | b"flush_all\n" => Ok(vec![CommandRef::Flush]),
-    b"version\r\n" | b"version\n" => Ok(vec![CommandRef::Version]),
-    b"stats\r\n" | b"stats\n" => Ok(vec![CommandRef::Stats]),
-    b"quit\r\n" | b"quit\n" => Ok(vec![CommandRef::Quit]),
+    b"flush_all\r\n" | b"flush_all\n" => Ok(CommandRef::Flush),
+    b"version\r\n" | b"version\n" => Ok(CommandRef::Version),
+    b"stats\r\n" | b"stats\n" => Ok(CommandRef::Stats),
+    b"quit\r\n" | b"quit\n" => Ok(CommandRef::Quit),
     _ => Err(DecodeCommandError::InvalidCommand),
   }
 }
@@ -1534,6 +663,8 @@ pub fn encode_binary_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComm
   }
 
   match command {
+    CommandRef::GetM { .. } => Err(EncodeCommandError::NotSupported),
+    CommandRef::GetAndTouchM { .. } => Err(EncodeCommandError::NotSupported),
     CommandRef::GetQ(cmd) => Ok(encode_key_command(0x09, cmd)),
     CommandRef::Get(cmd) => Ok(encode_key_command(0x00, cmd)),
     CommandRef::GetKQ(cmd) => Ok(encode_key_command(0x0d, cmd)),
@@ -1606,6 +737,10 @@ pub fn encode_text_command(command: &CommandRef) -> Result<Vec<u8>, EncodeComman
   }
 
   match command {
+    CommandRef::GetM { keys } => Ok(format!("get {}\r\n", keys.as_slice().join(" ")).into_bytes()),
+    CommandRef::GetAndTouchM { keys, exptime } => {
+      Ok(format!("gat {} {}\r\n", exptime, keys.as_slice().join(" ")).into_bytes())
+    }
     CommandRef::GetQ(_) => Err(EncodeCommandError::NotSupported),
     CommandRef::Get(KeyCommandRef { key }) => Ok(format!("get {key}\r\n").into_bytes()),
     CommandRef::GetKQ(_) => Err(EncodeCommandError::NotSupported),
@@ -1669,215 +804,210 @@ mod tests {
   #[test]
   fn test_decode_text_command() {
     let tests: &[(&[u8], _)] = &[
-      (b"get foo\r\n", Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo" })])),
+      (b"get foo\r\n", Ok(CommandRef::Get(KeyCommandRef { key: "foo" }))),
       (
         b"get foo bar\r\n",
-        Ok(vec![
-          CommandRef::Get(KeyCommandRef { key: "foo" }),
-          CommandRef::Get(KeyCommandRef { key: "bar" }),
-        ]),
+        Ok(CommandRef::GetM {
+          keys: vec!["foo", "bar"],
+        }),
       ),
-      (b"gets foo\r\n", Ok(vec![CommandRef::Get(KeyCommandRef { key: "foo" })])),
+      (b"gets foo\r\n", Ok(CommandRef::Get(KeyCommandRef { key: "foo" }))),
       (
         b"gets foo bar\r\n",
-        Ok(vec![
-          CommandRef::Get(KeyCommandRef { key: "foo" }),
-          CommandRef::Get(KeyCommandRef { key: "bar" }),
-        ]),
+        Ok(CommandRef::GetM {
+          keys: vec!["foo", "bar"],
+        }),
       ),
       (
         b"touch foo 123\r\n",
-        Ok(vec![CommandRef::Touch(TouchCommandRef {
+        Ok(CommandRef::Touch(TouchCommandRef {
           key: "foo",
           exptime: 123,
-        })]),
+        })),
       ),
       (
         b"touch foo 123 noreply\r\n",
-        Ok(vec![CommandRef::TouchQ(TouchCommandRef {
+        Ok(CommandRef::TouchQ(TouchCommandRef {
           key: "foo",
           exptime: 123,
-        })]),
+        })),
       ),
       (
         b"incr foo 2\r\n",
-        Ok(vec![CommandRef::Incr(IncrDecrCommandRef {
+        Ok(CommandRef::Incr(IncrDecrCommandRef {
           key: "foo",
           delta: 2,
           init: 0,
           exptime: 0,
-        })]),
+        })),
       ),
       (
         b"incr foo 2 noreply\r\n",
-        Ok(vec![CommandRef::IncrQ(IncrDecrCommandRef {
+        Ok(CommandRef::IncrQ(IncrDecrCommandRef {
           key: "foo",
           delta: 2,
           init: 0,
           exptime: 0,
-        })]),
+        })),
       ),
       (
         b"decr foo 2\r\n",
-        Ok(vec![CommandRef::Decr(IncrDecrCommandRef {
+        Ok(CommandRef::Decr(IncrDecrCommandRef {
           key: "foo",
           delta: 2,
           init: 0,
           exptime: 0,
-        })]),
+        })),
       ),
       (
         b"decr foo 2 noreply\r\n",
-        Ok(vec![CommandRef::DecrQ(IncrDecrCommandRef {
+        Ok(CommandRef::DecrQ(IncrDecrCommandRef {
           key: "foo",
           delta: 2,
           init: 0,
           exptime: 0,
-        })]),
+        })),
       ),
-      (
-        b"delete foo\r\n",
-        Ok(vec![CommandRef::Delete(KeyCommandRef { key: "foo" })]),
-      ),
+      (b"delete foo\r\n", Ok(CommandRef::Delete(KeyCommandRef { key: "foo" }))),
       (
         b"delete foo noreply\r\n",
-        Ok(vec![CommandRef::DeleteQ(KeyCommandRef { key: "foo" })]),
+        Ok(CommandRef::DeleteQ(KeyCommandRef { key: "foo" })),
       ),
       (
         b"set foo 123 321 3\r\nbar\r\n",
-        Ok(vec![CommandRef::Set(SetCommandRef {
+        Ok(CommandRef::Set(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
-        })]),
+        })),
       ),
       (
         b"set foo 123 321 0\r\n\r\n",
-        Ok(vec![CommandRef::Set(SetCommandRef {
+        Ok(CommandRef::Set(SetCommandRef {
           key: "foo",
           value: b"",
           flags: 123,
           exptime: 321,
           cas: None,
-        })]),
+        })),
       ),
       (
         b"set foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![CommandRef::SetQ(SetCommandRef {
+        Ok(CommandRef::SetQ(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
-        })]),
+        })),
       ),
       (b"set foo 123 321 1\r\nbar\r\n", Err(DecodeCommandError::InvalidFormat)),
       (b"set foo 123 321 1\r\nb", Err(DecodeCommandError::UnexpectedEof)),
       (b"set foo 123 321\r\nb\r\n", Err(DecodeCommandError::UnexpectedEof)),
       (
         b"add foo 123 321 3\r\nbar\r\n",
-        Ok(vec![CommandRef::Add(SetCommandRef {
+        Ok(CommandRef::Add(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
-        })]),
+        })),
       ),
       (
         b"add foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![CommandRef::AddQ(SetCommandRef {
+        Ok(CommandRef::AddQ(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
-        })]),
+        })),
       ),
       (
         b"replace foo 123 321 3\r\nbar\r\n",
-        Ok(vec![CommandRef::Replace(SetCommandRef {
+        Ok(CommandRef::Replace(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
-        })]),
+        })),
       ),
       (
         b"replace foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![CommandRef::ReplaceQ(SetCommandRef {
+        Ok(CommandRef::ReplaceQ(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: None,
-        })]),
+        })),
       ),
       (
         b"append foo 123 321 3\r\nbar\r\n",
-        Ok(vec![CommandRef::Append(AppendPrependCommandRef {
+        Ok(CommandRef::Append(AppendPrependCommandRef {
           key: "foo",
           value: b"bar",
-        })]),
+        })),
       ),
       (
         b"append foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![CommandRef::AppendQ(AppendPrependCommandRef {
+        Ok(CommandRef::AppendQ(AppendPrependCommandRef {
           key: "foo",
           value: b"bar",
-        })]),
+        })),
       ),
       (
         b"prepend foo 123 321 3\r\nbar\r\n",
-        Ok(vec![CommandRef::Prepend(AppendPrependCommandRef {
+        Ok(CommandRef::Prepend(AppendPrependCommandRef {
           key: "foo",
           value: b"bar",
-        })]),
+        })),
       ),
       (
         b"prepend foo 123 321 3 noreply\r\nbar\r\n",
-        Ok(vec![CommandRef::PrependQ(AppendPrependCommandRef {
+        Ok(CommandRef::PrependQ(AppendPrependCommandRef {
           key: "foo",
           value: b"bar",
-        })]),
+        })),
       ),
       (
         b"cas foo 123 321 3 567\r\nbar\r\n",
-        Ok(vec![CommandRef::Set(SetCommandRef {
+        Ok(CommandRef::Set(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: Some(567),
-        })]),
+        })),
       ),
       (
         b"cas foo 123 321 0 567\r\n\r\n",
-        Ok(vec![CommandRef::Set(SetCommandRef {
+        Ok(CommandRef::Set(SetCommandRef {
           key: "foo",
           value: b"",
           flags: 123,
           exptime: 321,
           cas: Some(567),
-        })]),
+        })),
       ),
       (
         b"cas foo 123 321 3 567 noreply\r\nbar\r\n",
-        Ok(vec![CommandRef::SetQ(SetCommandRef {
+        Ok(CommandRef::SetQ(SetCommandRef {
           key: "foo",
           value: b"bar",
           flags: 123,
           exptime: 321,
           cas: Some(567),
-        })]),
+        })),
       ),
-      (b"flush_all\r\n", Ok(vec![CommandRef::Flush])),
-      (b"version\r\n", Ok(vec![CommandRef::Version])),
-      (b"stats\r\n", Ok(vec![CommandRef::Stats])),
-      (b"quit\r\n", Ok(vec![CommandRef::Quit])),
+      (b"flush_all\r\n", Ok(CommandRef::Flush)),
+      (b"version\r\n", Ok(CommandRef::Version)),
+      (b"stats\r\n", Ok(CommandRef::Stats)),
+      (b"quit\r\n", Ok(CommandRef::Quit)),
     ];
 
     for t in tests {
@@ -1993,7 +1123,7 @@ mod tests {
       let encoded = encode_text_command(expected).unwrap();
       let decoded = decode_text_command(encoded.as_slice()).unwrap();
 
-      assert_eq!(expected, &decoded[0]);
+      assert_eq!(expected, &decoded);
     }
   }
 

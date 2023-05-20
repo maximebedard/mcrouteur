@@ -10,3 +10,4 @@ tokio = { version = "1.28", features = ["full"] }
 bytes = { version = "1.4" }
 url = { version = "2.3" }
 clap = { version = "4.2" }
+crc = { version = "3.0" }
