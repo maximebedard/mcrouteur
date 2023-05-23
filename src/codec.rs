@@ -132,15 +132,7 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
   fn string_trim_end_in_place(v: &mut String) {
     if v.ends_with("\r\n") {
       v.truncate(v.len() - 2);
-    } else if v.ends_with("\n") {
-      v.truncate(v.len() - 1);
-    }
-  }
-
-  fn bytes_trim_end_in_place(v: &mut Vec<u8>) {
-    if v.ends_with(b"\r\n") {
-      v.truncate(v.len() - 2);
-    } else if v.ends_with(b"\n") {
+    } else if v.ends_with('\n') {
       v.truncate(v.len() - 1);
     }
   }
@@ -149,12 +141,12 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
   r.read_line(&mut line).await?;
   string_trim_end_in_place(&mut line);
 
-  let mut chunks = line.splitn(2, " ");
-  let command = chunks.next().ok_or_else(|| unexpected_eof())?;
+  let mut chunks = line.splitn(2, ' ');
+  let command = chunks.next().ok_or_else(unexpected_eof)?;
   let args = chunks.next().unwrap_or("");
 
   fn decode_delete_command(args: &str) -> io::Result<KeyCommand> {
-    let key = args.split(' ').next().ok_or_else(|| unexpected_eof())?;
+    let key = args.split(' ').next().ok_or_else(unexpected_eof)?;
     let key = key.to_string();
     Ok(KeyCommand { key })
   }
@@ -162,10 +154,10 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
   fn decode_incr_decr_command(args: &str) -> io::Result<TextIncrDecrCommand> {
     let mut chunks = args.split(' ');
 
-    let key = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let key = chunks.next().ok_or_else(unexpected_eof)?;
     let key = key.to_string();
 
-    let delta = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let delta = chunks.next().ok_or_else(unexpected_eof)?;
     let delta = delta.parse().map_err(|_| invalid_data())?;
 
     Ok(TextIncrDecrCommand { key, delta })
@@ -174,10 +166,10 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
   fn decode_touch_command(args: &str) -> io::Result<TouchCommand> {
     let mut chunks = args.split(' ');
 
-    let key = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let key = chunks.next().ok_or_else(unexpected_eof)?;
     let key = key.to_string();
 
-    let exptime = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let exptime = chunks.next().ok_or_else(unexpected_eof)?;
     let exptime = exptime.parse().map_err(|_| invalid_data())?;
 
     Ok(TouchCommand { key, exptime })
@@ -189,21 +181,23 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
   ) -> io::Result<AppendPrependCommand> {
     let mut chunks = args.split(' ');
 
-    let key = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let key = chunks.next().ok_or_else(unexpected_eof)?;
     let key = key.to_string();
 
-    let _flags = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let _flags = chunks.next().ok_or_else(unexpected_eof)?;
     let _flags = _flags.parse::<u32>().map_err(|_| invalid_data())?;
 
-    let _exptime = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let _exptime = chunks.next().ok_or_else(unexpected_eof)?;
     let _exptime = _exptime.parse::<u32>().map_err(|_| invalid_data())?;
 
-    let value_len = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let value_len = chunks.next().ok_or_else(unexpected_eof)?;
     let value_len = value_len.parse::<usize>().map_err(|_| invalid_data())?;
 
     let mut value = Vec::with_capacity(value_len);
     r.read_buf(&mut value).await?;
-    bytes_trim_end_in_place(&mut value);
+
+    let mut new_line = Vec::with_capacity(2);
+    r.read_until(b'\n', &mut new_line).await?;
 
     Ok(AppendPrependCommand { key, value })
   }
@@ -211,21 +205,23 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
   async fn read_set_command(mut r: impl AsyncBufRead + Unpin, args: &str) -> io::Result<SetCommand> {
     let mut chunks = args.split(' ');
 
-    let key = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let key = chunks.next().ok_or_else(unexpected_eof)?;
     let key = key.to_string();
 
-    let flags = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let flags = chunks.next().ok_or_else(unexpected_eof)?;
     let flags = flags.parse().map_err(|_| invalid_data())?;
 
-    let exptime = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let exptime = chunks.next().ok_or_else(unexpected_eof)?;
     let exptime = exptime.parse().map_err(|_| invalid_data())?;
 
-    let value_len = chunks.next().ok_or_else(|| unexpected_eof())?;
+    let value_len = chunks.next().ok_or_else(unexpected_eof)?;
     let value_len = value_len.parse::<usize>().map_err(|_| invalid_data())?;
 
     let mut value = Vec::with_capacity(value_len);
     r.read_buf(&mut value).await?;
-    bytes_trim_end_in_place(&mut value);
+
+    let mut new_line = Vec::with_capacity(2);
+    r.read_until(b'\n', &mut new_line).await?;
 
     let cas = None;
 
@@ -246,7 +242,7 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
     "gat" | "gats" => {
       let mut chunks = args.split(' ');
 
-      let exptime = chunks.next().ok_or_else(|| unexpected_eof())?;
+      let exptime = chunks.next().ok_or_else(unexpected_eof)?;
       let exptime = exptime.parse().map_err(|_| invalid_data())?;
 
       let keys = chunks.map(Into::into).collect();
@@ -311,11 +307,17 @@ pub async fn read_binary_command(mut r: impl AsyncRead + Unpin) -> io::Result<Bi
   }
 
   if magic != 0x80 {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected magic byte for request").into());
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "unexpected magic byte for request",
+    ));
   }
 
   if data_type != 0x00 {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected data_type byte for request").into());
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "unexpected data_type byte for request",
+    ));
   }
 
   let header = Header {
@@ -339,7 +341,7 @@ pub async fn read_binary_command(mut r: impl AsyncRead + Unpin) -> io::Result<Bi
     assert!(key_len > 0);
     assert_eq!(key_len, body_len);
 
-    let key = body.get(0..key_len).ok_or_else(|| unexpected_eof())?;
+    let key = body.get(0..key_len).ok_or_else(unexpected_eof)?;
     let key = std::str::from_utf8(key).map_err(|_| invalid_data())?;
     let key = key.to_string();
 
@@ -362,12 +364,12 @@ pub async fn read_binary_command(mut r: impl AsyncRead + Unpin) -> io::Result<Bi
 
     let value_len = body_len - key_len - extras_len;
 
-    let key = body.get(0..key_len).ok_or_else(|| unexpected_eof())?;
+    let key = body.get(0..key_len).ok_or_else(unexpected_eof)?;
     let key = std::str::from_utf8(key).map_err(|_| invalid_data())?;
     let key = key.to_string();
     body.advance(key_len);
 
-    let value = body.get(0..value_len).ok_or_else(|| unexpected_eof())?;
+    let value = body.get(0..value_len).ok_or_else(unexpected_eof)?;
     let value = value.to_vec();
     body.advance(value_len);
 
@@ -391,13 +393,13 @@ pub async fn read_binary_command(mut r: impl AsyncRead + Unpin) -> io::Result<Bi
     assert!(key_len > 0);
     assert!(body_len >= key_len);
 
-    let key = body.get(0..key_len).ok_or_else(|| unexpected_eof())?;
+    let key = body.get(0..key_len).ok_or_else(unexpected_eof)?;
     let key = std::str::from_utf8(key).map_err(|_| invalid_data())?;
     let key = key.to_string();
     body.advance(key_len);
 
     let value_len = body_len - key_len;
-    let value = body.get(0..value_len).ok_or_else(|| unexpected_eof())?;
+    let value = body.get(0..value_len).ok_or_else(unexpected_eof)?;
     let value = value.to_vec();
     body.advance(value_len);
 
@@ -418,7 +420,7 @@ pub async fn read_binary_command(mut r: impl AsyncRead + Unpin) -> io::Result<Bi
     let init = body.get_u64();
     let exptime = body.get_u32();
 
-    let key = body.get(0..key_len).ok_or_else(|| unexpected_eof())?;
+    let key = body.get(0..key_len).ok_or_else(unexpected_eof)?;
     let key = std::str::from_utf8(key).map_err(|_| invalid_data())?;
     let key = key.to_string();
 
@@ -443,7 +445,7 @@ pub async fn read_binary_command(mut r: impl AsyncRead + Unpin) -> io::Result<Bi
 
     let exptime = body.get_u32();
 
-    let key = body.get(0..key_len).ok_or_else(|| unexpected_eof())?;
+    let key = body.get(0..key_len).ok_or_else(unexpected_eof)?;
     let key = std::str::from_utf8(key).map_err(|_| invalid_data())?;
     let key = key.to_string();
 

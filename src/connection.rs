@@ -20,6 +20,10 @@ use url::Url;
 pub enum ServerError {
   KeyNotFound,
   KeyExists,
+  ValueTooLarge,
+  InvalidArguments,
+  ItemNotStored,
+  IncrDecrOnNonNumericValue,
   Unknown(u16),
 }
 
@@ -28,6 +32,10 @@ impl From<u16> for ServerError {
     match value {
       0x0001 => Self::KeyNotFound,
       0x0002 => Self::KeyExists,
+      0x0003 => Self::ValueTooLarge,
+      0x0004 => Self::InvalidArguments,
+      0x0005 => Self::ItemNotStored,
+      0x0006 => Self::IncrDecrOnNonNumericValue,
       // 0x0001 	Key not found
       // 0x0002 	Key exists
       // 0x0003 	Value too large
@@ -53,6 +61,10 @@ impl fmt::Display for ServerError {
     match self {
       ServerError::KeyNotFound => write!(f, "key not found"),
       ServerError::KeyExists => write!(f, "key exists"),
+      ServerError::ValueTooLarge => write!(f, "value too large"),
+      ServerError::InvalidArguments => write!(f, "invalid arguments"),
+      ServerError::ItemNotStored => write!(f, "item not stored"),
+      ServerError::IncrDecrOnNonNumericValue => todo!(),
       ServerError::Unknown(code) => write!(f, "unknown error code {code}"),
     }
   }
