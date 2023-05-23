@@ -1,11 +1,11 @@
 use std::{io, time::Duration};
 
 use bytes::Bytes;
-use clap::{Arg, ArgAction, Command};
+use clap;
 use kvp::{
   codec::{
-    self, decode_command, AppendPrependCommandRef, CommandRef, IncrDecrCommandRef, KeyCommandRef, Protocol,
-    SetCommandRef,
+    self, AppendPrependCommand, BinaryCommand, Command, IncrDecrCommand, KeyCommand, SetCommand, TextCommand,
+    TouchCommand,
   },
   connection::{self, spawn_connection, ServerError},
 };
@@ -18,22 +18,22 @@ use url::Url;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-  let cmd = Command::new("kvp")
+  let cmd = clap::Command::new("kvp")
     .version("1.0")
     .author("Maxime Bedard <maxime@bedard.dev>")
     .arg(
-      Arg::new("bind-url")
+      clap::Arg::new("bind-url")
         .short('b')
         .long("bind-url")
         .default_value("tcp://[::]:11212")
         .value_parser(Url::parse),
     )
     .arg(
-      Arg::new("upstream-url")
+      clap::Arg::new("upstream-url")
         .short('u')
         .required(true)
         .long("upstream-url")
-        .action(ArgAction::Append)
+        .action(clap::ArgAction::Append)
         .value_parser(parse_named_url),
     );
 
@@ -118,9 +118,12 @@ async fn handle_stream(
   loop {
     tokio::select! {
         _ = &mut interrupt => break,
-        r = read_command(&mut stream) => match r {
-          Ok(Some(bytes)) => proxy_command(&mut client, &mut stream, bytes).await.unwrap(),
-          Ok(None) => break,
+        r = codec::read_command(&mut stream) => match r {
+          Ok(command) => {
+            proxy_command(&mut stream, &mut client, command).await.unwrap();
+            stream.flush().await.unwrap();
+          },
+          Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
           Err(err) => println!("{:?}", err),
         }
     }
@@ -129,130 +132,198 @@ async fn handle_stream(
   stream.shutdown().await.unwrap();
 }
 
-async fn read_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<Option<Vec<u8>>> {
-  r.fill_buf().await?;
-  todo!()
-}
-
-struct ResponseWriter<W> {
+struct BinaryResponseWriter<W> {
   w: W,
 }
 
-impl<W> ResponseWriter<W>
+impl<W> BinaryResponseWriter<W>
 where
   W: AsyncWrite + Unpin,
 {
   async fn write_set_command_response(&mut self, _op: u8, r: connection::Result<()>) -> io::Result<()> {
     todo!()
-    // match self.protocol {
-    //   codec::Protocol::Text => match r {
-    //     Ok(_) => self.w.write_all(b"STORED\r\n").await,
-    //     Err(connection::Error::Io(err)) => Err(err),
-    //     Err(connection::Error::Server(ServerError::KeyExists)) => self.w.write_all(b"EXISTS\r\n").await,
-    //     Err(connection::Error::Server(ServerError::KeyNotFound)) => self.w.write_all(b"NOT_FOUND\r\n").await,
-    //     Err(connection::Error::Server(ServerError::Unknown(code))) => {
-    //       self.w.write_all(format!("SERVER_ERROR {code}\r\n").as_bytes()).await
-    //     }
-    //   },
-    //   codec::Protocol::Binary => match r {
-    //     Ok(_) => todo!(),
-    //     Err(connection::Error::Io(err)) => Err(err),
-    //     Err(connection::Error::Server(_err)) => todo!(),
-    //   },
-    // }
   }
 
   async fn write_append_prepend_command_response(&mut self, _op: u8, r: connection::Result<()>) -> io::Result<()> {
     todo!()
-    // match self.protocol {
-    //   codec::Protocol::Text => match r {
-    //     Ok(_) => self.w.write_all(b"STORED\r\n").await,
-    //     Err(connection::Error::Io(err)) => Err(err),
-    //     Err(connection::Error::Server(ServerError::KeyExists)) => self.w.write_all(b"EXISTS\r\n").await,
-    //     Err(connection::Error::Server(ServerError::KeyNotFound)) => self.w.write_all(b"NOT_FOUND\r\n").await,
-    //     Err(connection::Error::Server(ServerError::Unknown(code))) => {
-    //       self.w.write_all(format!("SERVER_ERROR {code}\r\n").as_bytes()).await
-    //     }
-    //   },
-    //   codec::Protocol::Binary => match r {
-    //     Ok(_) => todo!(),
-    //     Err(connection::Error::Io(err)) => Err(err),
-    //     Err(connection::Error::Server(_err)) => todo!(),
-    //   },
-    // }
   }
 
-  async fn write_incr_decr_command_response(&mut self, _op: u8, r: connection::Result<()>) -> io::Result<()> {
+  async fn write_delete_command_response(&mut self, op: u8, r: connection::Result<()>) -> io::Result<()> {
+    todo!()
+  }
+
+  async fn write_incr_decr_command_response(&mut self, op: u8, r: connection::Result<u64>) -> io::Result<()> {
     todo!()
   }
 
   async fn write_get_command_response(&mut self, op: u8, key: &str, r: connection::Result<Bytes>) -> io::Result<()> {
     todo!()
   }
+
+  async fn write_touch_command_response(&mut self, op: u8, r: connection::Result<()>) -> io::Result<()> {
+    todo!()
+  }
+}
+
+struct TextResponseWriter<W> {
+  w: W,
+}
+
+impl<W> TextResponseWriter<W>
+where
+  W: AsyncWrite + Unpin,
+{
+  async fn write_set_command_response(&mut self, r: connection::Result<()>) -> io::Result<()> {
+    match r {
+      Ok(()) => self.w.write_all(b"STORED\r\n").await,
+      Err(connection::Error::Io(err)) => Err(err),
+      Err(connection::Error::Server(ServerError::KeyExists)) => self.w.write_all(b"EXISTS\r\n").await,
+      Err(connection::Error::Server(ServerError::KeyNotFound)) => self.w.write_all(b"NOT_FOUND\r\n").await,
+      Err(connection::Error::Server(ServerError::Unknown(code))) => {
+        self.w.write_all(format!("SERVER_ERROR {code}\r\n").as_bytes()).await
+      }
+    }
+  }
+
+  async fn write_append_prepend_command_response(&mut self, r: connection::Result<()>) -> io::Result<()> {
+    match r {
+      Ok(()) => self.w.write_all(b"STORED\r\n").await,
+      Err(connection::Error::Io(err)) => Err(err),
+      Err(connection::Error::Server(ServerError::KeyExists)) => self.w.write_all(b"EXISTS\r\n").await,
+      Err(connection::Error::Server(ServerError::KeyNotFound)) => self.w.write_all(b"NOT_FOUND\r\n").await,
+      Err(connection::Error::Server(ServerError::Unknown(code))) => {
+        self.w.write_all(format!("SERVER_ERROR {code}\r\n").as_bytes()).await
+      }
+    }
+  }
+
+  async fn write_delete_command_response(&mut self, r: connection::Result<()>) -> io::Result<()> {
+    match r {
+      Ok(()) => self.w.write_all(b"STORED\r\n").await,
+      Err(connection::Error::Io(err)) => Err(err),
+      Err(connection::Error::Server(ServerError::KeyExists)) => self.w.write_all(b"EXISTS\r\n").await,
+      Err(connection::Error::Server(ServerError::KeyNotFound)) => self.w.write_all(b"NOT_FOUND\r\n").await,
+      Err(connection::Error::Server(ServerError::Unknown(code))) => {
+        self.w.write_all(format!("SERVER_ERROR {code}\r\n").as_bytes()).await
+      }
+    }
+  }
+
+  async fn write_incr_decr_command_response(&mut self, r: connection::Result<u64>) -> io::Result<()> {
+    todo!()
+  }
+
+  async fn write_get_command_response(&mut self, key: &str, r: connection::Result<Bytes>) -> io::Result<()> {
+    todo!()
+  }
+
+  async fn write_touch_command_response(&mut self, r: connection::Result<()>) -> io::Result<()> {
+    todo!()
+  }
 }
 
 async fn proxy_command(
-  client: &mut mpsc::Sender<connection::Command>,
   w: impl AsyncWrite + Unpin,
-  input: Vec<u8>,
+  client: &mut mpsc::Sender<connection::Command>,
+  command: codec::Command,
 ) -> io::Result<()> {
-  let (protocol, command) = decode_command(input.as_slice()).unwrap();
-  let mut rw = ResponseWriter { w };
   match command {
-    CommandRef::Get(KeyCommandRef { key }) => {
+    codec::Command::Binary(BinaryCommand::Get(KeyCommand { key })) => {
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Get {
-          key: key.to_string(),
+          key: key.clone(),
           sender,
         })
         .await
         .ok();
-      rw.write_get_command_response(0x00, key, receiver.await.unwrap()).await
+      BinaryResponseWriter { w }
+        .write_get_command_response(0x00, key.as_str(), receiver.await.unwrap())
+        .await
     }
-    CommandRef::GetQ(_) => todo!(),
-    CommandRef::GetK(KeyCommandRef { key }) => {
+
+    codec::Command::Binary(BinaryCommand::GetK(KeyCommand { key })) => {
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Get {
-          key: key.to_string(),
+          key: key.clone(),
           sender,
         })
         .await
         .ok();
-      rw.write_get_command_response(0x00, key, receiver.await.unwrap()).await
+      BinaryResponseWriter { w }
+        .write_get_command_response(0x00, key.as_str(), receiver.await.unwrap())
+        .await
     }
-    CommandRef::GetKQ(_) => todo!(),
-    CommandRef::GetAndTouch(_) => todo!(),
-    CommandRef::GetAndTouchQ(_) => todo!(),
-    CommandRef::Set(SetCommandRef {
+
+    codec::Command::Binary(BinaryCommand::GetAndTouch(TouchCommand { key, exptime })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::GetAndTouch {
+          key: key.clone(),
+          exptime,
+          sender,
+        })
+        .await
+        .ok();
+      BinaryResponseWriter { w }
+        .write_get_command_response(0x00, key.as_str(), receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Set(SetCommand {
       key,
       value,
       flags: _,
       exptime,
       cas,
-    }) => {
+    })) => {
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Set {
-          key: key.to_string(),
-          value: value.to_vec(),
+          key,
+          value,
           exptime,
           cas,
           sender,
         })
         .await
         .ok();
-      rw.write_set_command_response(0x01, receiver.await.unwrap()).await
+      BinaryResponseWriter { w }
+        .write_set_command_response(0x01, receiver.await.unwrap())
+        .await
     }
-    CommandRef::SetQ(_) => todo!(),
-    CommandRef::Add(SetCommandRef {
+
+    codec::Command::Text(TextCommand::Set(SetCommand {
       key,
       value,
       flags: _,
       exptime,
       cas,
-    }) => {
+    })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Set {
+          key,
+          value,
+          exptime,
+          cas,
+          sender,
+        })
+        .await
+        .ok();
+      TextResponseWriter { w }
+        .write_set_command_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Add(SetCommand {
+      key,
+      value,
+      flags: _,
+      exptime,
+      cas,
+    })) => {
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Add {
@@ -264,16 +335,41 @@ async fn proxy_command(
         })
         .await
         .ok();
-      rw.write_set_command_response(0x02, receiver.await.unwrap()).await
+      BinaryResponseWriter { w }
+        .write_set_command_response(0x02, receiver.await.unwrap())
+        .await
     }
-    CommandRef::AddQ(_) => todo!(),
-    CommandRef::Replace(SetCommandRef {
+
+    codec::Command::Text(TextCommand::Add(SetCommand {
       key,
       value,
       flags: _,
       exptime,
       cas,
-    }) => {
+    })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Add {
+          key,
+          value,
+          exptime,
+          cas,
+          sender,
+        })
+        .await
+        .ok();
+      TextResponseWriter { w }
+        .write_set_command_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Replace(SetCommand {
+      key,
+      value,
+      flags: _,
+      exptime,
+      cas,
+    })) => {
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Add {
@@ -285,10 +381,35 @@ async fn proxy_command(
         })
         .await
         .ok();
-      rw.write_set_command_response(0x03, receiver.await.unwrap()).await
+      BinaryResponseWriter { w }
+        .write_set_command_response(0x03, receiver.await.unwrap())
+        .await
     }
-    CommandRef::ReplaceQ(_) => todo!(),
-    CommandRef::Append(AppendPrependCommandRef { key, value }) => {
+
+    codec::Command::Text(TextCommand::Replace(SetCommand {
+      key,
+      value,
+      flags: _,
+      exptime,
+      cas,
+    })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Add {
+          key: key.to_string(),
+          value: value.to_vec(),
+          exptime,
+          cas,
+          sender,
+        })
+        .await
+        .ok();
+      TextResponseWriter { w }
+        .write_set_command_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Append(AppendPrependCommand { key, value })) => {
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Append {
@@ -298,11 +419,23 @@ async fn proxy_command(
         })
         .await
         .ok();
-      rw.write_append_prepend_command_response(0x04, receiver.await.unwrap())
+      BinaryResponseWriter { w }
+        .write_append_prepend_command_response(0x04, receiver.await.unwrap())
         .await
     }
-    CommandRef::AppendQ(_) => todo!(),
-    CommandRef::Prepend(AppendPrependCommandRef { key, value }) => {
+
+    codec::Command::Text(TextCommand::Append(AppendPrependCommand { key, value })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Append { key, value, sender })
+        .await
+        .ok();
+      TextResponseWriter { w }
+        .write_append_prepend_command_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Prepend(AppendPrependCommand { key, value })) => {
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Prepend {
@@ -312,26 +445,115 @@ async fn proxy_command(
         })
         .await
         .ok();
-      rw.write_append_prepend_command_response(0x05, receiver.await.unwrap())
+      BinaryResponseWriter { w }
+        .write_append_prepend_command_response(0x05, receiver.await.unwrap())
         .await
     }
-    CommandRef::PrependQ(_) => todo!(),
-    CommandRef::Delete(_) => todo!(),
-    CommandRef::DeleteQ(_) => todo!(),
-    CommandRef::Incr(_) => todo!(),
-    CommandRef::IncrQ(_) => todo!(),
-    CommandRef::Decr(_) => todo!(),
-    CommandRef::DecrQ(_) => todo!(),
-    CommandRef::Touch(_) => todo!(),
-    CommandRef::TouchQ(_) => todo!(),
-    CommandRef::Flush => todo!(),
-    CommandRef::FlushQ => todo!(),
-    CommandRef::Version => todo!(),
-    CommandRef::Stats => todo!(),
-    CommandRef::Quit => todo!(),
-    CommandRef::QuitQ => todo!(),
-    CommandRef::Noop => todo!(),
-    CommandRef::GetM { .. } => todo!(),
-    CommandRef::GetAndTouchM { .. } => todo!(),
+
+    codec::Command::Text(TextCommand::Prepend(AppendPrependCommand { key, value })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Prepend { key, value, sender })
+        .await
+        .ok();
+      TextResponseWriter { w }
+        .write_append_prepend_command_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Delete(KeyCommand { key })) => {
+      let (sender, receiver) = oneshot::channel();
+      client.send(connection::Command::Delete { key, sender }).await.ok();
+      BinaryResponseWriter { w }
+        .write_delete_command_response(0x05, receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Text(TextCommand::Delete(KeyCommand { key })) => {
+      let (sender, receiver) = oneshot::channel();
+      client.send(connection::Command::Delete { key, sender }).await.ok();
+      TextResponseWriter { w }
+        .write_delete_command_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Incr(IncrDecrCommand {
+      key,
+      delta,
+      init,
+      exptime,
+    })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Increment {
+          key: key.to_string(),
+          delta,
+          init,
+          exptime,
+          sender,
+        })
+        .await
+        .ok();
+      BinaryResponseWriter { w }
+        .write_incr_decr_command_response(0x05, receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Decr(IncrDecrCommand {
+      key,
+      delta,
+      init,
+      exptime,
+    })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Increment {
+          key: key.to_string(),
+          delta,
+          init,
+          exptime,
+          sender,
+        })
+        .await
+        .ok();
+      BinaryResponseWriter { w }
+        .write_incr_decr_command_response(0x05, receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Touch(TouchCommand { key, exptime })) => {
+      let (sender, receiver) = oneshot::channel();
+      client
+        .send(connection::Command::Touch {
+          key: key.to_string(),
+          exptime,
+          sender,
+        })
+        .await
+        .ok();
+      BinaryResponseWriter { w }
+        .write_touch_command_response(0x05, receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Binary(BinaryCommand::Flush) => todo!(),
+    codec::Command::Binary(BinaryCommand::Version) => todo!(),
+    codec::Command::Binary(BinaryCommand::Stats) => todo!(),
+    codec::Command::Binary(BinaryCommand::Quit) => todo!(),
+    codec::Command::Binary(BinaryCommand::Noop) => todo!(),
+    codec::Command::Binary(BinaryCommand::SetQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::AddQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::ReplaceQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::AppendQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::GetQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::GetKQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::GetAndTouchQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::PrependQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::DeleteQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::IncrQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::DecrQ(_)) => todo!(),
+    codec::Command::Binary(BinaryCommand::FlushQ) => todo!(),
+    codec::Command::Binary(BinaryCommand::QuitQ) => todo!(),
+    _ => todo!(),
   }
 }

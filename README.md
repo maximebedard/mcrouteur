@@ -8,5 +8,10 @@ Supports:
 - [ ] Replicated pools
 - [ ] Consistent hashing
 - [ ] Connection pooling
+- [ ] Quiet operations
 - [x] Text protocol (Downstream)
 - [x] Binary protocol (Upstream & Downstream)
+
+Implementation notes:
+
+- GET with multiple keys are exploded into multiple GET with a single key

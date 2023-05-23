@@ -23,6 +23,31 @@ pub enum ServerError {
   Unknown(u16),
 }
 
+impl From<u16> for ServerError {
+  fn from(value: u16) -> Self {
+    match value {
+      0x0001 => Self::KeyNotFound,
+      0x0002 => Self::KeyExists,
+      // 0x0001 	Key not found
+      // 0x0002 	Key exists
+      // 0x0003 	Value too large
+      // 0x0004 	Invalid arguments
+      // 0x0005 	Item not stored
+      // 0x0006 	Incr/Decr on non-numeric value.
+      // 0x0007 	The vbucket belongs to another server
+      // 0x0008 	Authentication error
+      // 0x0009 	Authentication continue
+      // 0x0081 	Unknown command
+      // 0x0082 	Out of memory
+      // 0x0083 	Not supported
+      // 0x0084 	Internal error
+      // 0x0085 	Busy
+      // 0x0086 	Temporary failure
+      code => Self::Unknown(code),
+    }
+  }
+}
+
 impl fmt::Display for ServerError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
@@ -130,6 +155,20 @@ pub enum Command {
     key: String,
     value: Vec<u8>,
     sender: oneshot::Sender<Result<()>>,
+  },
+  Increment {
+    key: String,
+    delta: u64,
+    init: u64,
+    exptime: u32,
+    sender: oneshot::Sender<Result<u64>>,
+  },
+  Decrement {
+    key: String,
+    delta: u64,
+    init: u64,
+    exptime: u32,
+    sender: oneshot::Sender<Result<u64>>,
   },
   Delete {
     key: String,
@@ -241,6 +280,24 @@ async fn handle_command(connection: &mut Connection, command: Command) {
     Command::Prepend { key, value, sender } => {
       sender.send(connection.prepend(key, value).await).ok();
     }
+    Command::Increment {
+      key,
+      delta,
+      init,
+      exptime,
+      sender,
+    } => {
+      sender.send(connection.incr(key, delta, init, exptime).await).ok();
+    }
+    Command::Decrement {
+      key,
+      delta,
+      init,
+      exptime,
+      sender,
+    } => {
+      sender.send(connection.decr(key, delta, init, exptime).await).ok();
+    }
     Command::Delete { key, sender } => {
       sender.send(connection.delete(key).await).ok();
     }
@@ -346,9 +403,7 @@ impl Connection {
   async fn set_command(&mut self, op: u8, key: &str, value: &[u8], exptime: u32, cas: Option<u64>) -> Result<()> {
     self.write_set_command(op, key, value, exptime, cas).await?;
     self.stream.flush().await?;
-    let (_header, body) = self.read_response().await?;
-    assert!(body.is_empty());
-    Ok(())
+    self.read_empty_response().await
   }
 
   pub async fn stats(&mut self) -> Result<BTreeMap<String, String>> {
@@ -371,6 +426,23 @@ impl Connection {
     }
 
     Ok(kv)
+  }
+
+  pub async fn incr(&mut self, key: impl AsRef<str>, delta: u64, init: u64, exptime: u32) -> Result<u64> {
+    self.incr_decr_command(0x05, key.as_ref(), delta, init, exptime).await
+  }
+
+  pub async fn decr(&mut self, key: impl AsRef<str>, delta: u64, init: u64, exptime: u32) -> Result<u64> {
+    self.incr_decr_command(0x06, key.as_ref(), delta, init, exptime).await
+  }
+
+  pub async fn incr_decr_command(&mut self, op: u8, key: &str, delta: u64, init: u64, exptime: u32) -> Result<u64> {
+    self.write_incr_decr_command(op, key, delta, init, exptime).await?;
+    self.stream.flush().await?;
+    let (_header, mut body) = self.read_response().await?;
+    let value = body.get_u64();
+    assert!(body.is_empty());
+    Ok(value)
   }
 
   pub async fn version(&mut self) -> Result<String> {
@@ -399,17 +471,13 @@ impl Connection {
   async fn append_prepend_command(&mut self, op: u8, key: &str, value: &[u8]) -> Result<()> {
     self.write_append_prepend_command(op, key, value).await?;
     self.stream.flush().await?;
-    let (_header, body) = self.read_response().await?;
-    assert!(body.is_empty());
-    Ok(())
+    self.read_empty_response().await
   }
 
   pub async fn delete(&mut self, key: impl AsRef<str>) -> Result<()> {
     self.write_key_command(0x04, key.as_ref()).await?;
     self.stream.flush().await?;
-    let (_header, body) = self.read_response().await?;
-    assert!(body.is_empty());
-    Ok(())
+    self.read_empty_response().await
   }
 
   pub async fn flush(&mut self) -> Result<()> {
@@ -423,9 +491,7 @@ impl Connection {
   async fn command(&mut self, op: u8) -> Result<()> {
     self.write_command(op).await?;
     self.stream.flush().await?;
-    let (_header, body) = self.read_response().await?;
-    assert!(body.is_empty());
-    Ok(())
+    self.read_empty_response().await
   }
 
   async fn write_command(&mut self, op: u8) -> io::Result<()> {
@@ -435,6 +501,33 @@ impl Connection {
         ..Header::request()
       })
       .await
+  }
+
+  pub async fn write_incr_decr_command(
+    &mut self,
+    op: u8,
+    key: &str,
+    delta: u64,
+    init: u64,
+    exptime: u32,
+  ) -> Result<()> {
+    let key_len = key.len();
+    let extras_len = 0;
+    let body_len = key_len + extras_len;
+    self
+      .write_request_header(Header {
+        op,
+        key_len,
+        extras_len,
+        body_len,
+        ..Header::request()
+      })
+      .await?;
+    self.stream.write_all(key.as_bytes()).await?;
+    self.stream.write_u64(delta).await?;
+    self.stream.write_u64(init).await?;
+    self.stream.write_u32(exptime).await?;
+    Ok(())
   }
 
   async fn write_set_command(
@@ -523,6 +616,12 @@ impl Connection {
     self.stream.write_u32(h.body_len.try_into().unwrap()).await?;
     self.stream.write_u32(h.opaque).await?;
     self.stream.write_u64(h.cas).await?;
+    Ok(())
+  }
+
+  async fn read_empty_response(&mut self) -> Result<()> {
+    let (_header, body) = self.read_response().await?;
+    assert!(body.is_empty());
     Ok(())
   }
 
