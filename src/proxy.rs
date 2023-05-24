@@ -708,6 +708,30 @@ pub async fn proxy_command(
         .await
     }
 
+    codec::Command::Text(TextCommand::Flush) => {
+      let (sender, receiver) = oneshot::channel();
+      client.send(connection::Command::Flush { sender }).await.ok();
+      TextResponseWriter { w }
+        .write_ok_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Text(TextCommand::Version) => {
+      let (sender, receiver) = oneshot::channel();
+      client.send(connection::Command::Version { sender }).await.ok();
+      TextResponseWriter { w }
+        .write_version_response(receiver.await.unwrap())
+        .await
+    }
+
+    codec::Command::Text(TextCommand::Stats) => {
+      let (sender, receiver) = oneshot::channel();
+      client.send(connection::Command::Stats { sender }).await.ok();
+      TextResponseWriter { w }
+        .write_stats_response(receiver.await.unwrap())
+        .await
+    }
+
     codec::Command::Binary(BinaryCommand::Quit) => todo!(),
     codec::Command::Binary(BinaryCommand::SetQ(_)) => todo!(),
     codec::Command::Binary(BinaryCommand::AddQ(_)) => todo!(),
@@ -722,30 +746,7 @@ pub async fn proxy_command(
     codec::Command::Binary(BinaryCommand::DecrQ(_)) => todo!(),
     codec::Command::Binary(BinaryCommand::FlushQ) => todo!(),
     codec::Command::Binary(BinaryCommand::QuitQ) => todo!(),
-
-    codec::Command::Text(TextCommand::Flush) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Flush { sender }).await.ok();
-      TextResponseWriter { w }
-        .write_ok_response(receiver.await.unwrap())
-        .await
-    }
-    codec::Command::Text(TextCommand::Version) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Version { sender }).await.ok();
-      TextResponseWriter { w }
-        .write_version_response(receiver.await.unwrap())
-        .await
-    }
-    codec::Command::Text(TextCommand::Stats) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Stats { sender }).await.ok();
-      TextResponseWriter { w }
-        .write_stats_response(receiver.await.unwrap())
-        .await
-    }
     codec::Command::Text(TextCommand::Quit) => todo!(),
-
     codec::Command::Text(TextCommand::SetQ(_)) => todo!(),
     codec::Command::Text(TextCommand::AddQ(_)) => todo!(),
     codec::Command::Text(TextCommand::ReplaceQ(_)) => todo!(),
@@ -754,7 +755,6 @@ pub async fn proxy_command(
     codec::Command::Text(TextCommand::DeleteQ(_)) => todo!(),
     codec::Command::Text(TextCommand::IncrQ(_)) => todo!(),
     codec::Command::Text(TextCommand::DecrQ(_)) => todo!(),
-
     codec::Command::Text(TextCommand::TouchQ(_)) => todo!(),
   }
 }
