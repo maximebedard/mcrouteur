@@ -27,32 +27,32 @@ pub enum ServerError {
   Unknown(u16),
 }
 
-impl From<u16> for ServerError {
-  fn from(value: u16) -> Self {
-    match value {
-      0x0001 => Self::KeyNotFound,
-      0x0002 => Self::KeyExists,
-      0x0003 => Self::ValueTooLarge,
-      0x0004 => Self::InvalidArguments,
-      0x0005 => Self::ItemNotStored,
-      0x0006 => Self::IncrDecrOnNonNumericValue,
-      // 0x0001 	Key not found
-      // 0x0002 	Key exists
-      // 0x0003 	Value too large
-      // 0x0004 	Invalid arguments
-      // 0x0005 	Item not stored
-      // 0x0006 	Incr/Decr on non-numeric value.
-      // 0x0007 	The vbucket belongs to another server
-      // 0x0008 	Authentication error
-      // 0x0009 	Authentication continue
-      // 0x0081 	Unknown command
-      // 0x0082 	Out of memory
-      // 0x0083 	Not supported
-      // 0x0084 	Internal error
-      // 0x0085 	Busy
-      // 0x0086 	Temporary failure
-      code => Self::Unknown(code),
+impl ServerError {
+  pub fn code(&self) -> u16 {
+    match self {
+      Self::KeyNotFound => 0x0001,
+      Self::KeyExists => 0x0002,
+      Self::ValueTooLarge => 0x0003,
+      Self::InvalidArguments => 0x0004,
+      Self::ItemNotStored => 0x0005,
+      Self::IncrDecrOnNonNumericValue => 0x0006,
+      Self::Unknown(code) => *code,
     }
+    // 0x0001 	Key not found
+    // 0x0002 	Key exists
+    // 0x0003 	Value too large
+    // 0x0004 	Invalid arguments
+    // 0x0005 	Item not stored
+    // 0x0006 	Incr/Decr on non-numeric value.
+    // 0x0007 	The vbucket belongs to another server
+    // 0x0008 	Authentication error
+    // 0x0009 	Authentication continue
+    // 0x0081 	Unknown command
+    // 0x0082 	Out of memory
+    // 0x0083 	Not supported
+    // 0x0084 	Internal error
+    // 0x0085 	Busy
+    // 0x0086 	Temporary failure
   }
 }
 
@@ -690,22 +690,29 @@ impl Connection {
 }
 
 #[derive(Debug, Default)]
-struct Header {
-  magic: u8,
-  op: u8,
-  key_len: usize,
-  extras_len: usize,
-  data_type: u8,
-  status: u16,
-  body_len: usize,
-  opaque: u32,
-  cas: u64,
+pub struct Header {
+  pub magic: u8,
+  pub op: u8,
+  pub key_len: usize,
+  pub extras_len: usize,
+  pub data_type: u8,
+  pub status: u16,
+  pub body_len: usize,
+  pub opaque: u32,
+  pub cas: u64,
 }
 
 impl Header {
-  fn request() -> Self {
+  pub fn request() -> Self {
     Self {
       magic: 0x80,
+      ..Default::default()
+    }
+  }
+
+  pub fn response() -> Self {
+    Self {
+      magic: 0x81,
       ..Default::default()
     }
   }

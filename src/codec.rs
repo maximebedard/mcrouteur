@@ -218,7 +218,9 @@ pub async fn read_text_command(mut r: impl AsyncBufRead + Unpin) -> io::Result<T
     let value_len = value_len.parse::<usize>().map_err(|_| invalid_data())?;
 
     let mut value = Vec::with_capacity(value_len);
-    r.read_buf(&mut value).await?;
+    if value_len > 0 {
+      r.read_buf(&mut value).await?;
+    }
 
     let mut new_line = Vec::with_capacity(2);
     r.read_until(b'\n', &mut new_line).await?;
@@ -1213,6 +1215,7 @@ mod tests {
       BinaryCommand::Stats,
       BinaryCommand::QuitQ,
       BinaryCommand::Quit,
+      BinaryCommand::Noop,
     ];
 
     for expected in tests.iter() {

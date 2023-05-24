@@ -1,8 +1,12 @@
 version: "3.1"
 
 services:
-  pg:
+  memcached1:
     image: "memcached:1.6"
-    restart: "always"
     ports:
       - "11211:11211"
+
+  memcached2:
+    image: "memcached:1.6"
+    ports:
+      - "11212:11212"
