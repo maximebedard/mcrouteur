@@ -203,12 +203,18 @@ pub enum Command {
   },
 }
 
-pub fn spawn_connection(
-  mut receiver: mpsc::Receiver<Command>,
-  url: Url,
-  max_idle_duration: Duration,
-  max_age_duration: Duration,
-) -> JoinHandle<()> {
+pub fn spawn_connection(mut receiver: mpsc::Receiver<Command>, url: Url) -> JoinHandle<()> {
+  let params = url.query_pairs().collect::<BTreeMap<_, _>>();
+
+  let max_idle_duration = params
+    .get("max_idle")
+    .and_then(|v| v.parse().ok().map(Duration::from_secs))
+    .unwrap_or(Duration::from_secs(30 * 60));
+  let max_age_duration = params
+    .get("max_age")
+    .and_then(|v| v.parse().ok().map(Duration::from_secs))
+    .unwrap_or(Duration::from_secs(30 * 60));
+
   tokio::task::spawn(async move {
     while let Some(command) = receiver.recv().await {
       let mut connection = Connection::connect(url.clone()).await.unwrap();

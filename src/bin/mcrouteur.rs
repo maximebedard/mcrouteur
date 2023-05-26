@@ -1,10 +1,6 @@
-use std::{io, time::Duration};
+use std::{io, path::PathBuf};
 
-use mcrouteur::{
-  codec,
-  connection::{self, spawn_connection},
-  proxy,
-};
+use mcrouteur::{codec, connection, proxy, router};
 use tokio::{
   io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufStream},
   net::{TcpListener, UnixListener},
@@ -21,34 +17,52 @@ async fn main() -> io::Result<()> {
       clap::Arg::new("bind-url")
         .short('b')
         .long("bind-url")
-        .default_value("tcp://[::]:11211")
+        .default_value("tcp://localhost:11211") // TODO: ipv6
         .value_parser(Url::parse),
     )
     .arg(
-      clap::Arg::new("upstream-url")
-        .short('u')
-        .required(true)
-        .long("upstream-url")
-        .action(clap::ArgAction::Append)
-        .value_parser(parse_named_url),
+      clap::Arg::new("config-file")
+        .long("config-file")
+        .value_name("JSON-FILE")
+        .conflicts_with("config")
+        .value_parser(clap::value_parser!(PathBuf)),
+    )
+    .arg(
+      clap::Arg::new("config")
+        .long("config")
+        .value_name("JSON")
+        .value_parser(clap::value_parser!(String)),
     );
 
-  let matches = cmd.get_matches();
+  let mut matches = cmd.get_matches();
 
-  let bind_url = matches.get_one::<Url>("bind-url").unwrap();
-  let upstream_urls = matches
-    .get_many::<(String, Url)>("upstream-url")
-    .unwrap()
-    .collect::<Vec<_>>();
+  let bind_url = matches.remove_one::<Url>("bind-url").unwrap();
+
+  let mut router_configuration = None;
+  if let Some(config) = matches.remove_one::<PathBuf>("config-file") {
+    let bytes = tokio::fs::read(config).await?;
+    router_configuration = serde_json::from_slice(bytes.as_slice()).map_err(|err| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("Failed to parse router configuration: {err}"),
+      )
+    })?;
+  } else if let Some(config) = matches.remove_one::<String>("config") {
+    router_configuration = serde_json::from_str(config.as_str()).map_err(|err| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("Failed to parse router configuration: {err}"),
+      )
+    })?;
+  }
+  if let Some(router_configuration) = &router_configuration {
+    eprintln!("Starting with configuration:");
+    eprintln!("{}", serde_json::to_string_pretty(router_configuration).unwrap());
+  }
+  eprintln!("Listening on {bind_url}...");
 
   let (sender, receiver) = mpsc::channel(32);
-
-  spawn_connection(
-    receiver,
-    upstream_urls[0].1.clone(),
-    Duration::from_secs(60 * 5),
-    Duration::from_secs(60 * 30),
-  );
+  router::spawn_router(router_configuration, receiver);
 
   let interrupt = tokio::signal::ctrl_c();
   tokio::pin!(interrupt);
@@ -87,13 +101,6 @@ async fn main() -> io::Result<()> {
   Ok(())
 }
 
-fn parse_named_url(input: &str) -> Result<(String, Url), String> {
-  let (name, url) = input.split_once('=').ok_or_else(|| "invalid format".to_string())?;
-  let name = name.to_string();
-  let url = Url::parse(url).map_err(|err| err.to_string())?;
-  Ok((name, url))
-}
-
 async fn handle_stream(
   mut stream: impl AsyncBufRead + AsyncWrite + Unpin,
   mut client: mpsc::Sender<connection::Command>,
@@ -110,7 +117,7 @@ async fn handle_stream(
             stream.flush().await.unwrap();
           },
           Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
-          Err(err) => println!("{:?}", err),
+          Err(err) => eprintln!("{:?}", err),
         }
     }
   }
