@@ -122,85 +122,56 @@ impl Error {
   }
 }
 
+#[derive(Debug, Clone)]
+pub struct SetCommand {
+  pub key: String,
+  pub value: Vec<u8>,
+  pub cas: Option<u64>,
+  pub exptime: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppendPrependCommand {
+  pub key: String,
+  pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IncrDecrCommand {
+  pub key: String,
+  pub delta: u64,
+  pub init: u64,
+  pub exptime: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyCommand {
+  pub key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TouchCommand {
+  pub key: String,
+  pub exptime: u32,
+}
+
 pub enum Command {
-  Get {
-    key: String,
-    sender: oneshot::Sender<Result<Bytes>>,
-  },
-  GetAndTouch {
-    key: String,
-    exptime: u32,
-    sender: oneshot::Sender<Result<Bytes>>,
-  },
-  Touch {
-    key: String,
-    exptime: u32,
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Set {
-    key: String,
-    value: Vec<u8>,
-    cas: Option<u64>,
-    exptime: u32,
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Add {
-    key: String,
-    value: Vec<u8>,
-    cas: Option<u64>,
-    exptime: u32,
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Replace {
-    key: String,
-    value: Vec<u8>,
-    cas: Option<u64>,
-    exptime: u32,
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Append {
-    key: String,
-    value: Vec<u8>,
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Prepend {
-    key: String,
-    value: Vec<u8>,
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Increment {
-    key: String,
-    delta: u64,
-    init: u64,
-    exptime: u32,
-    sender: oneshot::Sender<Result<u64>>,
-  },
-  Decrement {
-    key: String,
-    delta: u64,
-    init: u64,
-    exptime: u32,
-    sender: oneshot::Sender<Result<u64>>,
-  },
-  Delete {
-    key: String,
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Flush {
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Quit {
-    sender: oneshot::Sender<Result<()>>,
-  },
-  Stats {
-    sender: oneshot::Sender<Result<BTreeMap<String, String>>>,
-  },
-  Version {
-    sender: oneshot::Sender<Result<String>>,
-  },
-  Noop {
-    sender: oneshot::Sender<Result<()>>,
-  },
+  Get(KeyCommand, oneshot::Sender<Result<Bytes>>),
+  GetAndTouch(TouchCommand, oneshot::Sender<Result<Bytes>>),
+  Touch(TouchCommand, oneshot::Sender<Result<()>>),
+  Set(SetCommand, oneshot::Sender<Result<()>>),
+  Add(SetCommand, oneshot::Sender<Result<()>>),
+  Replace(SetCommand, oneshot::Sender<Result<()>>),
+  Append(AppendPrependCommand, oneshot::Sender<Result<()>>),
+  Prepend(AppendPrependCommand, oneshot::Sender<Result<()>>),
+  Increment(IncrDecrCommand, oneshot::Sender<Result<u64>>),
+  Decrement(IncrDecrCommand, oneshot::Sender<Result<u64>>),
+  Delete(KeyCommand, oneshot::Sender<Result<()>>),
+  Flush(oneshot::Sender<Result<()>>),
+  Quit(oneshot::Sender<Result<()>>),
+  Stats(oneshot::Sender<Result<BTreeMap<String, String>>>),
+  Version(oneshot::Sender<Result<String>>),
+  Noop(oneshot::Sender<Result<()>>),
 }
 
 pub fn spawn_connection(mut receiver: mpsc::Receiver<Command>, url: Url) -> JoinHandle<()> {
@@ -247,82 +218,92 @@ pub fn spawn_connection(mut receiver: mpsc::Receiver<Command>, url: Url) -> Join
 
 async fn handle_command(connection: &mut Connection, command: Command) {
   match command {
-    Command::Get { key, sender } => {
+    Command::Get(KeyCommand { key }, sender) => {
       sender.send(connection.get(key).await).ok();
     }
-    Command::GetAndTouch { key, exptime, sender } => {
+    Command::GetAndTouch(TouchCommand { key, exptime }, sender) => {
       sender.send(connection.gat(key, exptime).await).ok();
     }
-    Command::Touch { key, exptime, sender } => {
+    Command::Touch(TouchCommand { key, exptime }, sender) => {
       sender.send(connection.touch(key, exptime).await).ok();
     }
-    Command::Set {
-      key,
-      value,
-      exptime,
-      cas,
+    Command::Set(
+      SetCommand {
+        key,
+        value,
+        exptime,
+        cas,
+      },
       sender,
-    } => {
+    ) => {
       sender.send(connection.set(key, value, exptime, cas).await).ok();
     }
-    Command::Add {
-      key,
-      value,
-      exptime,
-      cas,
+    Command::Add(
+      SetCommand {
+        key,
+        value,
+        exptime,
+        cas,
+      },
       sender,
-    } => {
+    ) => {
       sender.send(connection.add(key, value, exptime, cas).await).ok();
     }
-    Command::Replace {
-      key,
-      value,
-      exptime,
-      cas,
+    Command::Replace(
+      SetCommand {
+        key,
+        value,
+        exptime,
+        cas,
+      },
       sender,
-    } => {
+    ) => {
       sender.send(connection.replace(key, value, exptime, cas).await).ok();
     }
-    Command::Stats { sender } => {
+    Command::Stats(sender) => {
       sender.send(connection.stats().await).ok();
     }
-    Command::Version { sender } => {
+    Command::Version(sender) => {
       sender.send(connection.version().await).ok();
     }
-    Command::Noop { sender } => {
+    Command::Noop(sender) => {
       sender.send(connection.noop().await).ok();
     }
-    Command::Append { key, value, sender } => {
+    Command::Append(AppendPrependCommand { key, value }, sender) => {
       sender.send(connection.append(key, value).await).ok();
     }
-    Command::Prepend { key, value, sender } => {
+    Command::Prepend(AppendPrependCommand { key, value }, sender) => {
       sender.send(connection.prepend(key, value).await).ok();
     }
-    Command::Increment {
-      key,
-      delta,
-      init,
-      exptime,
+    Command::Increment(
+      IncrDecrCommand {
+        key,
+        delta,
+        init,
+        exptime,
+      },
       sender,
-    } => {
+    ) => {
       sender.send(connection.incr(key, delta, init, exptime).await).ok();
     }
-    Command::Decrement {
-      key,
-      delta,
-      init,
-      exptime,
+    Command::Decrement(
+      IncrDecrCommand {
+        key,
+        delta,
+        init,
+        exptime,
+      },
       sender,
-    } => {
+    ) => {
       sender.send(connection.decr(key, delta, init, exptime).await).ok();
     }
-    Command::Delete { key, sender } => {
+    Command::Delete(KeyCommand { key }, sender) => {
       sender.send(connection.delete(key).await).ok();
     }
-    Command::Flush { sender } => {
+    Command::Flush(sender) => {
       sender.send(connection.flush().await).ok();
     }
-    Command::Quit { sender } => {
+    Command::Quit(sender) => {
       sender.send(connection.quit().await).ok();
     }
   }
@@ -398,6 +379,18 @@ impl Connection {
     self.set_command(0x01, key.as_ref(), value.as_ref(), exptime, cas).await
   }
 
+  pub async fn setq(
+    &mut self,
+    key: impl AsRef<str>,
+    value: impl AsRef<[u8]>,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
+    self
+      .set_command_quiet(0x11, key.as_ref(), value.as_ref(), exptime, cas)
+      .await
+  }
+
   pub async fn add(
     &mut self,
     key: impl AsRef<str>,
@@ -406,6 +399,18 @@ impl Connection {
     cas: Option<u64>,
   ) -> Result<()> {
     self.set_command(0x02, key.as_ref(), value.as_ref(), exptime, cas).await
+  }
+
+  pub async fn addq(
+    &mut self,
+    key: impl AsRef<str>,
+    value: impl AsRef<[u8]>,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
+    self
+      .set_command_quiet(0x12, key.as_ref(), value.as_ref(), exptime, cas)
+      .await
   }
 
   pub async fn replace(
@@ -418,10 +423,34 @@ impl Connection {
     self.set_command(0x03, key.as_ref(), value.as_ref(), exptime, cas).await
   }
 
+  pub async fn replaceq(
+    &mut self,
+    key: impl AsRef<str>,
+    value: impl AsRef<[u8]>,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
+    self
+      .set_command_quiet(0x13, key.as_ref(), value.as_ref(), exptime, cas)
+      .await
+  }
+
   async fn set_command(&mut self, op: u8, key: &str, value: &[u8], exptime: u32, cas: Option<u64>) -> Result<()> {
     self.write_set_command(op, key, value, exptime, cas).await?;
     self.stream.flush().await?;
     self.read_empty_response().await
+  }
+
+  async fn set_command_quiet(
+    &mut self,
+    op: u8,
+    key: &str,
+    value: &[u8],
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> io::Result<()> {
+    self.write_set_command(op, key, value, exptime, cas).await?;
+    self.stream.flush().await
   }
 
   pub async fn stats(&mut self) -> Result<BTreeMap<String, String>> {
@@ -450,11 +479,35 @@ impl Connection {
     self.incr_decr_command(0x05, key.as_ref(), delta, init, exptime).await
   }
 
+  pub async fn incrq(&mut self, key: impl AsRef<str>, delta: u64, init: u64, exptime: u32) -> io::Result<()> {
+    self
+      .incr_decr_command_quiet(0x15, key.as_ref(), delta, init, exptime)
+      .await
+  }
+
   pub async fn decr(&mut self, key: impl AsRef<str>, delta: u64, init: u64, exptime: u32) -> Result<u64> {
     self.incr_decr_command(0x06, key.as_ref(), delta, init, exptime).await
   }
 
-  pub async fn incr_decr_command(&mut self, op: u8, key: &str, delta: u64, init: u64, exptime: u32) -> Result<u64> {
+  pub async fn decrq(&mut self, key: impl AsRef<str>, delta: u64, init: u64, exptime: u32) -> io::Result<()> {
+    self
+      .incr_decr_command_quiet(0x16, key.as_ref(), delta, init, exptime)
+      .await
+  }
+
+  async fn incr_decr_command_quiet(
+    &mut self,
+    op: u8,
+    key: &str,
+    delta: u64,
+    init: u64,
+    exptime: u32,
+  ) -> io::Result<()> {
+    self.write_incr_decr_command(op, key, delta, init, exptime).await?;
+    self.stream.flush().await
+  }
+
+  async fn incr_decr_command(&mut self, op: u8, key: &str, delta: u64, init: u64, exptime: u32) -> Result<u64> {
     self.write_incr_decr_command(op, key, delta, init, exptime).await?;
     self.stream.flush().await?;
     let (_header, mut body) = self.read_response().await?;
@@ -482,14 +535,31 @@ impl Connection {
     self.append_prepend_command(0x0e, key.as_ref(), value.as_ref()).await
   }
 
+  pub async fn appendq(&mut self, key: impl AsRef<str>, value: impl AsRef<[u8]>) -> io::Result<()> {
+    self
+      .append_prepend_command_quiet(0x0e, key.as_ref(), value.as_ref())
+      .await
+  }
+
   pub async fn prepend(&mut self, key: impl AsRef<str>, value: impl AsRef<[u8]>) -> Result<()> {
     self.append_prepend_command(0x0f, key.as_ref(), value.as_ref()).await
+  }
+
+  pub async fn prependq(&mut self, key: impl AsRef<str>, value: impl AsRef<[u8]>) -> io::Result<()> {
+    self
+      .append_prepend_command_quiet(0x0e, key.as_ref(), value.as_ref())
+      .await
   }
 
   async fn append_prepend_command(&mut self, op: u8, key: &str, value: &[u8]) -> Result<()> {
     self.write_append_prepend_command(op, key, value).await?;
     self.stream.flush().await?;
     self.read_empty_response().await
+  }
+
+  async fn append_prepend_command_quiet(&mut self, op: u8, key: &str, value: &[u8]) -> io::Result<()> {
+    self.write_append_prepend_command(op, key, value).await?;
+    self.stream.flush().await
   }
 
   pub async fn delete(&mut self, key: impl AsRef<str>) -> Result<()> {
@@ -528,7 +598,7 @@ impl Connection {
     delta: u64,
     init: u64,
     exptime: u32,
-  ) -> Result<()> {
+  ) -> io::Result<()> {
     let key_len = key.len();
     let extras_len = 0;
     let body_len = key_len + extras_len;

@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use crc::{Crc, CRC_32_ISO_HDLC};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+  sync::{mpsc, oneshot},
+  task::JoinHandle,
+};
 use url::Url;
 
 use crate::connection::{self, spawn_connection};
@@ -119,25 +122,23 @@ pub fn spawn_router(
   tokio::task::spawn(async move {
     while let Some(command) = receiver.recv().await {
       match command {
-        connection::Command::Get { ref key, .. }
-        | connection::Command::GetAndTouch { ref key, .. }
-        | connection::Command::Touch { ref key, .. }
-        | connection::Command::Set { ref key, .. }
-        | connection::Command::Add { ref key, .. }
-        | connection::Command::Replace { ref key, .. }
-        | connection::Command::Append { ref key, .. }
-        | connection::Command::Prepend { ref key, .. }
-        | connection::Command::Increment { ref key, .. }
-        | connection::Command::Decrement { ref key, .. }
-        | connection::Command::Delete { ref key, .. } => {
+        connection::Command::Get(connection::KeyCommand { ref key, .. }, _)
+        | connection::Command::GetAndTouch(connection::TouchCommand { ref key, .. }, _)
+        | connection::Command::Touch(connection::TouchCommand { ref key, .. }, _)
+        | connection::Command::Set(connection::SetCommand { ref key, .. }, _)
+        | connection::Command::Add(connection::SetCommand { ref key, .. }, _)
+        | connection::Command::Replace(connection::SetCommand { ref key, .. }, _)
+        | connection::Command::Append(connection::AppendPrependCommand { ref key, .. }, _)
+        | connection::Command::Prepend(connection::AppendPrependCommand { ref key, .. }, _)
+        | connection::Command::Increment(connection::IncrDecrCommand { ref key, .. }, _)
+        | connection::Command::Decrement(connection::IncrDecrCommand { ref key, .. }, _)
+        | connection::Command::Delete(connection::KeyCommand { ref key, .. }, _) => {
           if let Some(route) = router.routes.get(key).or(router.wildcard_route.as_ref()) {
             match route {
               Route::Proxy { sender } => {
                 sender.send(command).await.ok();
               }
-              Route::BroadcastSelect { senders: _ } => {
-                todo!();
-              }
+              Route::BroadcastSelect { senders } => broadcast(command, senders).await,
               Route::Random { senders } => {
                 let i = rand::random::<usize>() % senders.len();
                 if let Some(sender) = senders.get(i) {
@@ -160,30 +161,387 @@ pub fn spawn_router(
           }
         }
 
-        connection::Command::Flush { sender } => {
+        connection::Command::Flush(sender) => {
           sender
             .send(Err(connection::Error::Server(connection::ServerError::Unknown(999))))
             .ok();
         }
 
-        connection::Command::Quit { sender } => {
+        connection::Command::Quit(sender) => {
           sender
             .send(Err(connection::Error::Server(connection::ServerError::Unknown(999))))
             .ok();
         }
 
-        connection::Command::Stats { sender } => {
+        connection::Command::Stats(sender) => {
           sender.send(Ok(BTreeMap::new())).ok();
         }
 
-        connection::Command::Version { sender } => {
+        connection::Command::Version(sender) => {
           sender.send(Ok(env!("CARGO_PKG_VERSION").to_string())).ok();
         }
 
-        connection::Command::Noop { sender } => {
+        connection::Command::Noop(sender) => {
           sender.send(Ok(())).ok();
         }
       }
     }
   })
+}
+
+async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<connection::Command>>) {
+  match command {
+    connection::Command::Get(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Get(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::GetAndTouch(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::GetAndTouch(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Touch(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Touch(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Set(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Set(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Add(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Set(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Replace(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Set(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Append(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Append(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Prepend(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Prepend(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Increment(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Increment(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Decrement(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Decrement(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Delete(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Delete(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Flush(sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Flush(sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Quit(sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Quit(sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Stats(sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Stats(sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Version(sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Version(sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+    connection::Command::Noop(sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Noop(sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            sender.send(receiver.await.unwrap()).await.ok();
+          });
+        }
+
+        receiver
+      };
+
+      sender.send(receiver.recv().await.unwrap()).ok();
+    }
+  }
 }
