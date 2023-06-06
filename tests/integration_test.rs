@@ -34,7 +34,16 @@ async fn test_mcrouteur_proxy_configuration() {
       "--bind-url",
       "tcp://localhost:11210",
       "--config",
-      r#"{"upstreams":{"primary": "tcp://[::]:11211"},"routes":{},"wildcard_route":{"type": "proxy", "upstream": "primary"}}"#
+      r#"{
+        "upstreams": {
+          "primary": "tcp://[::]:11211"
+        },
+        "routes":{},
+        "wildcard_route":{
+          "type": "proxy",
+          "upstream": "primary"
+        }
+      }"#,
     ])
     .kill_on_drop(true)
     .spawn()
@@ -58,7 +67,84 @@ async fn test_mcrouteur_proxy_configuration() {
 }
 
 #[tokio::test]
-async fn test_mcrouter_prefix_routes() {}
+async fn test_mcrouter_prefix_routes() {
+  let _command = Command::new(env!("CARGO_BIN_EXE_mcrouteur"))
+    .args(&[
+      "--bind-url",
+      "tcp://localhost:11210",
+      "--config",
+      r#"{
+        "upstreams": {
+          "a": "tcp://[::]:11211",
+          "b": "tcp://[::]:11212",
+          "c": "tcp://[::]:11213"
+        },
+        "routes": {
+          "a:": {
+            "type": "proxy",
+            "upstream": "a"
+          },
+          "b:": {
+            "type": "proxy",
+            "upstream": "b"
+          },
+          "c:": {
+            "type": "proxy",
+            "upstream": "c"
+          }
+        },
+        "wildcard_route": null
+      }"#,
+    ])
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+
+  tokio::time::sleep(Duration::from_millis(1000)).await;
+
+  let mut proxy = Connection::connect("tcp://[::]:11210".parse().unwrap()).await.unwrap();
+
+  let mut a = Connection::connect("tcp://[::]:11211".parse().unwrap()).await.unwrap();
+  let mut b = Connection::connect("tcp://[::]:11212".parse().unwrap()).await.unwrap();
+  let mut c = Connection::connect("tcp://[::]:11213".parse().unwrap()).await.unwrap();
+
+  tokio::try_join!(a.flush(), b.flush(), c.flush()).unwrap();
+
+  proxy.set("a:foo", "toto", 0, None).await.unwrap();
+  assert_eq!(b"toto", a.get("a:foo").await.unwrap().chunk());
+  assert_eq!(
+    Some(ServerError::KeyNotFound),
+    b.get("a:foo").await.unwrap_err().as_server_error()
+  );
+  assert_eq!(
+    Some(ServerError::KeyNotFound),
+    c.get("a:foo").await.unwrap_err().as_server_error()
+  );
+
+  proxy.set("b:foo", "titi", 0, None).await.unwrap();
+  assert_eq!(
+    Some(ServerError::KeyNotFound),
+    a.get("b:foo").await.unwrap_err().as_server_error()
+  );
+  assert_eq!(b"titi", b.get("b:foo").await.unwrap().chunk());
+  assert_eq!(
+    Some(ServerError::KeyNotFound),
+    c.get("b:foo").await.unwrap_err().as_server_error()
+  );
+
+  proxy.set("c:foo", "tata", 0, None).await.unwrap();
+  assert_eq!(
+    Some(ServerError::KeyNotFound),
+    a.get("c:foo").await.unwrap_err().as_server_error()
+  );
+  assert_eq!(
+    Some(ServerError::KeyNotFound),
+    b.get("c:foo").await.unwrap_err().as_server_error()
+  );
+  assert_eq!(b"tata", c.get("c:foo").await.unwrap().chunk());
+
+  tokio::try_join!(proxy.close(), a.close(), b.close(), c.close()).unwrap();
+}
 
 async fn test_binary_commands(conn: &mut Connection) {
   conn.set("foo", b"bar", 0, None).await.unwrap();

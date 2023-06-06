@@ -9,9 +9,9 @@ services:
   memcached2:
     image: "memcached:1.6"
     ports:
-      - "11212:11212"
+      - "11212:11211"
 
   memcached3:
     image: "memcached:1.6"
     ports:
-      - "11213:11213"
+      - "11213:11211"

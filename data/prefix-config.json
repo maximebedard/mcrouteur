@@ -1,0 +1,22 @@
+{
+  "upstreams": {
+    "a": "tcp://[::]:11211",
+    "b": "tcp://[::]:11212",
+    "c": "tcp://[::]:11213"
+  },
+  "routes": {
+    "a:": {
+      "type": "proxy",
+      "upstream": "a"
+    },
+    "b:": {
+      "type": "proxy",
+      "upstream": "b"
+    },
+    "c:": {
+      "type": "proxy",
+      "upstream": "c"
+    }
+  },
+  "wildcard_route": null
+}

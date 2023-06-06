@@ -16,6 +16,8 @@ use tokio::{
 };
 use url::Url;
 
+use crate::codec::{AppendPrependCommand, IncrDecrCommand, KeyCommand, SetCommand, TouchCommand};
+
 #[derive(Debug, PartialEq)]
 pub enum ServerError {
   KeyNotFound,
@@ -122,41 +124,9 @@ impl Error {
   }
 }
 
-#[derive(Debug, Clone)]
-pub struct SetCommand {
-  pub key: String,
-  pub value: Vec<u8>,
-  pub cas: Option<u64>,
-  pub exptime: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppendPrependCommand {
-  pub key: String,
-  pub value: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct IncrDecrCommand {
-  pub key: String,
-  pub delta: u64,
-  pub init: u64,
-  pub exptime: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct KeyCommand {
-  pub key: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TouchCommand {
-  pub key: String,
-  pub exptime: u32,
-}
-
 pub enum Command {
   Get(KeyCommand, oneshot::Sender<Result<Bytes>>),
+  Delete(KeyCommand, oneshot::Sender<Result<()>>),
   GetAndTouch(TouchCommand, oneshot::Sender<Result<Bytes>>),
   Touch(TouchCommand, oneshot::Sender<Result<()>>),
   Set(SetCommand, oneshot::Sender<Result<()>>),
@@ -166,12 +136,24 @@ pub enum Command {
   Prepend(AppendPrependCommand, oneshot::Sender<Result<()>>),
   Increment(IncrDecrCommand, oneshot::Sender<Result<u64>>),
   Decrement(IncrDecrCommand, oneshot::Sender<Result<u64>>),
-  Delete(KeyCommand, oneshot::Sender<Result<()>>),
-  Flush(oneshot::Sender<Result<()>>),
-  Quit(oneshot::Sender<Result<()>>),
-  Stats(oneshot::Sender<Result<BTreeMap<String, String>>>),
-  Version(oneshot::Sender<Result<String>>),
-  Noop(oneshot::Sender<Result<()>>),
+}
+
+impl Command {
+  pub fn key(&self) -> &String {
+    match self {
+      Command::Get(KeyCommand { ref key }, _) => key,
+      Command::Delete(KeyCommand { ref key }, _) => key,
+      Command::GetAndTouch(TouchCommand { ref key, .. }, _) => key,
+      Command::Touch(TouchCommand { ref key, .. }, _) => key,
+      Command::Set(SetCommand { ref key, .. }, _) => key,
+      Command::Add(SetCommand { ref key, .. }, _) => key,
+      Command::Replace(SetCommand { ref key, .. }, _) => key,
+      Command::Append(AppendPrependCommand { ref key, .. }, _) => key,
+      Command::Prepend(AppendPrependCommand { ref key, .. }, _) => key,
+      Command::Increment(IncrDecrCommand { ref key, .. }, _) => key,
+      Command::Decrement(IncrDecrCommand { ref key, .. }, _) => key,
+    }
+  }
 }
 
 pub fn spawn_connection(mut receiver: mpsc::Receiver<Command>, url: Url) -> JoinHandle<()> {
@@ -231,6 +213,7 @@ async fn handle_command(connection: &mut Connection, command: Command) {
       SetCommand {
         key,
         value,
+        flags: _,
         exptime,
         cas,
       },
@@ -242,6 +225,7 @@ async fn handle_command(connection: &mut Connection, command: Command) {
       SetCommand {
         key,
         value,
+        flags: _,
         exptime,
         cas,
       },
@@ -253,6 +237,7 @@ async fn handle_command(connection: &mut Connection, command: Command) {
       SetCommand {
         key,
         value,
+        flags: _,
         exptime,
         cas,
       },
@@ -260,15 +245,7 @@ async fn handle_command(connection: &mut Connection, command: Command) {
     ) => {
       sender.send(connection.replace(key, value, exptime, cas).await).ok();
     }
-    Command::Stats(sender) => {
-      sender.send(connection.stats().await).ok();
-    }
-    Command::Version(sender) => {
-      sender.send(connection.version().await).ok();
-    }
-    Command::Noop(sender) => {
-      sender.send(connection.noop().await).ok();
-    }
+
     Command::Append(AppendPrependCommand { key, value }, sender) => {
       sender.send(connection.append(key, value).await).ok();
     }
@@ -299,12 +276,6 @@ async fn handle_command(connection: &mut Connection, command: Command) {
     }
     Command::Delete(KeyCommand { key }, sender) => {
       sender.send(connection.delete(key).await).ok();
-    }
-    Command::Flush(sender) => {
-      sender.send(connection.flush().await).ok();
-    }
-    Command::Quit(sender) => {
-      sender.send(connection.quit().await).ok();
     }
   }
 }

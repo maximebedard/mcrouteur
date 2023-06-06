@@ -295,10 +295,7 @@ pub async fn proxy_command(
       for key in keys {
         let (sender, receiver) = oneshot::channel();
         client
-          .send(connection::Command::Get(
-            connection::KeyCommand { key: key.to_string() },
-            sender,
-          ))
+          .send(connection::Command::Get(KeyCommand { key: key.to_string() }, sender))
           .await
           .ok();
         receivers.push((key, receiver));
@@ -318,7 +315,7 @@ pub async fn proxy_command(
         let (sender, receiver) = oneshot::channel();
         client
           .send(connection::Command::GetAndTouch(
-            connection::TouchCommand {
+            TouchCommand {
               key: key.to_string(),
               exptime,
             },
@@ -340,10 +337,7 @@ pub async fn proxy_command(
     codec::Command::Binary(BinaryCommand::Get(KeyCommand { key })) => {
       let (sender, receiver) = oneshot::channel();
       client
-        .send(connection::Command::Get(
-          connection::KeyCommand { key: key.clone() },
-          sender,
-        ))
+        .send(connection::Command::Get(KeyCommand { key: key.clone() }, sender))
         .await
         .ok();
       BinaryResponseWriter { w }
@@ -354,10 +348,7 @@ pub async fn proxy_command(
     codec::Command::Binary(BinaryCommand::GetK(KeyCommand { key })) => {
       let (sender, receiver) = oneshot::channel();
       client
-        .send(connection::Command::Get(
-          connection::KeyCommand { key: key.clone() },
-          sender,
-        ))
+        .send(connection::Command::Get(KeyCommand { key: key.clone() }, sender))
         .await
         .ok();
       BinaryResponseWriter { w }
@@ -369,7 +360,7 @@ pub async fn proxy_command(
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::GetAndTouch(
-          connection::TouchCommand {
+          TouchCommand {
             key: key.clone(),
             exptime,
           },
@@ -382,207 +373,82 @@ pub async fn proxy_command(
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Set(SetCommand {
-      key,
-      value,
-      flags: _,
-      exptime,
-      cas,
-    })) => {
+    codec::Command::Binary(BinaryCommand::Set(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Set(
-          connection::SetCommand {
-            key,
-            value,
-            exptime,
-            cas,
-          },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Set(args, sender)).await.ok();
+
       BinaryResponseWriter { w }
         .write_status_response(0x01, receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Text(TextCommand::Set(SetCommand {
-      key,
-      value,
-      flags: _,
-      exptime,
-      cas,
-    })) => {
+    codec::Command::Text(TextCommand::Set(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Set(
-          connection::SetCommand {
-            key,
-            value,
-            exptime,
-            cas,
-          },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Set(args, sender)).await.ok();
       TextResponseWriter { w }
         .write_set_command_response(receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Add(SetCommand {
-      key,
-      value,
-      flags: _,
-      exptime,
-      cas,
-    })) => {
+    codec::Command::Binary(BinaryCommand::Add(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Add(
-          connection::SetCommand {
-            key,
-            value,
-            exptime,
-            cas,
-          },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Add(args, sender)).await.ok();
       BinaryResponseWriter { w }
         .write_status_response(0x02, receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Text(TextCommand::Add(SetCommand {
-      key,
-      value,
-      flags: _,
-      exptime,
-      cas,
-    })) => {
+    codec::Command::Text(TextCommand::Add(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Add(
-          connection::SetCommand {
-            key,
-            value,
-            exptime,
-            cas,
-          },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Add(args, sender)).await.ok();
       TextResponseWriter { w }
         .write_set_command_response(receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Replace(SetCommand {
-      key,
-      value,
-      flags: _,
-      exptime,
-      cas,
-    })) => {
+    codec::Command::Binary(BinaryCommand::Replace(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Replace(
-          connection::SetCommand {
-            key,
-            value,
-            exptime,
-            cas,
-          },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Replace(args, sender)).await.ok();
       BinaryResponseWriter { w }
         .write_status_response(0x03, receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Text(TextCommand::Replace(SetCommand {
-      key,
-      value,
-      flags: _,
-      exptime,
-      cas,
-    })) => {
+    codec::Command::Text(TextCommand::Replace(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Replace(
-          connection::SetCommand {
-            key,
-            value,
-            exptime,
-            cas,
-          },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Replace(args, sender)).await.ok();
       TextResponseWriter { w }
         .write_set_command_response(receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Append(AppendPrependCommand { key, value })) => {
+    codec::Command::Binary(BinaryCommand::Append(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Append(
-          connection::AppendPrependCommand { key, value },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Append(args, sender)).await.ok();
       BinaryResponseWriter { w }
         .write_status_response(0x0e, receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Text(TextCommand::Append(AppendPrependCommand { key, value })) => {
+    codec::Command::Text(TextCommand::Append(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Append(
-          connection::AppendPrependCommand { key, value },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Append(args, sender)).await.ok();
       TextResponseWriter { w }
         .write_set_command_response(receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Prepend(AppendPrependCommand { key, value })) => {
+    codec::Command::Binary(BinaryCommand::Prepend(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Prepend(
-          connection::AppendPrependCommand { key, value },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Prepend(args, sender)).await.ok();
       BinaryResponseWriter { w }
         .write_status_response(0x0f, receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Text(TextCommand::Prepend(AppendPrependCommand { key, value })) => {
+    codec::Command::Text(TextCommand::Prepend(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Prepend(
-          connection::AppendPrependCommand { key, value },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Prepend(args, sender)).await.ok();
       TextResponseWriter { w }
         .write_set_command_response(receiver.await.unwrap())
         .await
@@ -591,7 +457,7 @@ pub async fn proxy_command(
     codec::Command::Binary(BinaryCommand::Delete(KeyCommand { key })) => {
       let (sender, receiver) = oneshot::channel();
       client
-        .send(connection::Command::Delete(connection::KeyCommand { key }, sender))
+        .send(connection::Command::Delete(KeyCommand { key }, sender))
         .await
         .ok();
       BinaryResponseWriter { w }
@@ -602,7 +468,7 @@ pub async fn proxy_command(
     codec::Command::Text(TextCommand::Delete(KeyCommand { key })) => {
       let (sender, receiver) = oneshot::channel();
       client
-        .send(connection::Command::Delete(connection::KeyCommand { key }, sender))
+        .send(connection::Command::Delete(KeyCommand { key }, sender))
         .await
         .ok();
       TextResponseWriter { w }
@@ -619,7 +485,7 @@ pub async fn proxy_command(
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Increment(
-          connection::IncrDecrCommand {
+          IncrDecrCommand {
             key,
             delta,
             init,
@@ -638,7 +504,7 @@ pub async fn proxy_command(
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Increment(
-          connection::IncrDecrCommand {
+          IncrDecrCommand {
             key,
             delta,
             init: 0,
@@ -653,25 +519,9 @@ pub async fn proxy_command(
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Decr(IncrDecrCommand {
-      key,
-      delta,
-      init,
-      exptime,
-    })) => {
+    codec::Command::Binary(BinaryCommand::Decr(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Increment(
-          connection::IncrDecrCommand {
-            key,
-            delta,
-            init,
-            exptime,
-          },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Increment(args, sender)).await.ok();
       BinaryResponseWriter { w }
         .write_incr_decr_command_response(0x06, receiver.await.unwrap())
         .await
@@ -681,7 +531,7 @@ pub async fn proxy_command(
       let (sender, receiver) = oneshot::channel();
       client
         .send(connection::Command::Decrement(
-          connection::IncrDecrCommand {
+          IncrDecrCommand {
             key,
             delta,
             init: 0,
@@ -696,91 +546,55 @@ pub async fn proxy_command(
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Touch(TouchCommand { key, exptime })) => {
+    codec::Command::Binary(BinaryCommand::Touch(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Touch(
-          connection::TouchCommand { key, exptime },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Touch(args, sender)).await.ok();
       BinaryResponseWriter { w }
         .write_touch_response(0x1c, receiver.await.unwrap())
         .await
     }
 
-    codec::Command::Text(TextCommand::Touch(TouchCommand { key, exptime })) => {
+    codec::Command::Text(TextCommand::Touch(args)) => {
       let (sender, receiver) = oneshot::channel();
-      client
-        .send(connection::Command::Touch(
-          connection::TouchCommand { key, exptime },
-          sender,
-        ))
-        .await
-        .ok();
+      client.send(connection::Command::Touch(args, sender)).await.ok();
       TextResponseWriter { w }
         .write_touch_command_response(receiver.await.unwrap())
         .await
     }
 
     codec::Command::Binary(BinaryCommand::Flush) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Flush(sender)).await.ok();
-      BinaryResponseWriter { w }
-        .write_status_response(0x08, receiver.await.unwrap())
-        .await
+      BinaryResponseWriter { w }.write_status_response(0x08, Ok(())).await
     }
 
     codec::Command::Binary(BinaryCommand::Version) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Version(sender)).await.ok();
       BinaryResponseWriter { w }
-        .write_version_response(0x0b, receiver.await.unwrap())
+        .write_version_response(0x0b, Ok("1.0.0".to_string()))
         .await
     }
 
     codec::Command::Binary(BinaryCommand::Stats) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Stats(sender)).await.ok();
       BinaryResponseWriter { w }
-        .write_stats_response(0x10, receiver.await.unwrap())
+        .write_stats_response(0x10, Ok(BTreeMap::new()))
         .await
     }
 
-    codec::Command::Binary(BinaryCommand::Noop) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Noop(sender)).await.ok();
-      BinaryResponseWriter { w }
-        .write_status_response(0x0a, receiver.await.unwrap())
-        .await
-    }
+    codec::Command::Binary(BinaryCommand::Noop) => BinaryResponseWriter { w }.write_status_response(0x0a, Ok(())).await,
 
-    codec::Command::Text(TextCommand::Flush) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Flush(sender)).await.ok();
-      TextResponseWriter { w }
-        .write_ok_response(receiver.await.unwrap())
-        .await
-    }
+    codec::Command::Text(TextCommand::Flush) => TextResponseWriter { w }.write_ok_response(Ok(())).await,
 
     codec::Command::Text(TextCommand::Version) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Version(sender)).await.ok();
       TextResponseWriter { w }
-        .write_version_response(receiver.await.unwrap())
+        .write_version_response(Ok("1.0.0".to_string()))
         .await
     }
 
     codec::Command::Text(TextCommand::Stats) => {
-      let (sender, receiver) = oneshot::channel();
-      client.send(connection::Command::Stats(sender)).await.ok();
-      TextResponseWriter { w }
-        .write_stats_response(receiver.await.unwrap())
-        .await
+      TextResponseWriter { w }.write_stats_response(Ok(BTreeMap::new())).await
     }
 
-    codec::Command::Binary(BinaryCommand::Quit) => todo!(),
+    codec::Command::Binary(BinaryCommand::Quit) => TextResponseWriter { w }.write_ok_response(Ok(())).await,
+    codec::Command::Text(TextCommand::Quit) => BinaryResponseWriter { w }.write_status_response(0x17, Ok(())).await,
+
     codec::Command::Binary(BinaryCommand::SetQ(_)) => todo!(),
     codec::Command::Binary(BinaryCommand::AddQ(_)) => todo!(),
     codec::Command::Binary(BinaryCommand::ReplaceQ(_)) => todo!(),
@@ -794,7 +608,6 @@ pub async fn proxy_command(
     codec::Command::Binary(BinaryCommand::DecrQ(_)) => todo!(),
     codec::Command::Binary(BinaryCommand::FlushQ) => todo!(),
     codec::Command::Binary(BinaryCommand::QuitQ) => todo!(),
-    codec::Command::Text(TextCommand::Quit) => todo!(),
     codec::Command::Text(TextCommand::SetQ(_)) => todo!(),
     codec::Command::Text(TextCommand::AddQ(_)) => todo!(),
     codec::Command::Text(TextCommand::ReplaceQ(_)) => todo!(),

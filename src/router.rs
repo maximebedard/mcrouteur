@@ -7,7 +7,10 @@ use tokio::{
 };
 use url::Url;
 
-use crate::connection::{self, spawn_connection};
+use crate::{
+  connection::{self, spawn_connection},
+  trie::Trie,
+};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct RouterConfiguration {
@@ -59,7 +62,7 @@ pub enum HashAlgorithm {
 
 #[derive(Debug, Default)]
 struct Router {
-  routes: BTreeMap<String, Route>,
+  routes: Trie<Route>,
   wildcard_route: Option<Route>,
 }
 
@@ -121,68 +124,31 @@ pub fn spawn_router(
 
   tokio::task::spawn(async move {
     while let Some(command) = receiver.recv().await {
-      match command {
-        connection::Command::Get(connection::KeyCommand { ref key, .. }, _)
-        | connection::Command::GetAndTouch(connection::TouchCommand { ref key, .. }, _)
-        | connection::Command::Touch(connection::TouchCommand { ref key, .. }, _)
-        | connection::Command::Set(connection::SetCommand { ref key, .. }, _)
-        | connection::Command::Add(connection::SetCommand { ref key, .. }, _)
-        | connection::Command::Replace(connection::SetCommand { ref key, .. }, _)
-        | connection::Command::Append(connection::AppendPrependCommand { ref key, .. }, _)
-        | connection::Command::Prepend(connection::AppendPrependCommand { ref key, .. }, _)
-        | connection::Command::Increment(connection::IncrDecrCommand { ref key, .. }, _)
-        | connection::Command::Decrement(connection::IncrDecrCommand { ref key, .. }, _)
-        | connection::Command::Delete(connection::KeyCommand { ref key, .. }, _) => {
-          if let Some(route) = router.routes.get(key).or(router.wildcard_route.as_ref()) {
-            match route {
-              Route::Proxy { sender } => {
-                sender.send(command).await.ok();
-              }
-              Route::BroadcastSelect { senders } => broadcast(command, senders).await,
-              Route::Random { senders } => {
-                let i = rand::random::<usize>() % senders.len();
-                if let Some(sender) = senders.get(i) {
-                  sender.send(command).await.ok();
-                }
-              }
-              Route::Hash { algorithm, senders } => {
-                let checksum: usize = match algorithm {
-                  HashAlgorithm::Crc32 => Crc::<u32>::new(&CRC_32_ISO_HDLC)
-                    .checksum(key.as_bytes())
-                    .try_into()
-                    .unwrap(),
-                };
-                let i = checksum % senders.len();
-                if let Some(sender) = senders.get(i) {
-                  sender.send(command).await.ok();
-                }
-              }
+      let key = command.key();
+      if let Some(route) = router.routes.find_predecessor(key).or(router.wildcard_route.as_ref()) {
+        match route {
+          Route::Proxy { sender } => {
+            sender.send(command).await.ok();
+          }
+          Route::BroadcastSelect { senders } => broadcast(command, senders).await,
+          Route::Random { senders } => {
+            let i = rand::random::<usize>() % senders.len();
+            if let Some(sender) = senders.get(i) {
+              sender.send(command).await.ok();
             }
           }
-        }
-
-        connection::Command::Flush(sender) => {
-          sender
-            .send(Err(connection::Error::Server(connection::ServerError::Unknown(999))))
-            .ok();
-        }
-
-        connection::Command::Quit(sender) => {
-          sender
-            .send(Err(connection::Error::Server(connection::ServerError::Unknown(999))))
-            .ok();
-        }
-
-        connection::Command::Stats(sender) => {
-          sender.send(Ok(BTreeMap::new())).ok();
-        }
-
-        connection::Command::Version(sender) => {
-          sender.send(Ok(env!("CARGO_PKG_VERSION").to_string())).ok();
-        }
-
-        connection::Command::Noop(sender) => {
-          sender.send(Ok(())).ok();
+          Route::Hash { algorithm, senders } => {
+            let checksum: usize = match algorithm {
+              HashAlgorithm::Crc32 => Crc::<u32>::new(&CRC_32_ISO_HDLC)
+                .checksum(key.as_bytes())
+                .try_into()
+                .unwrap(),
+            };
+            let i = checksum % senders.len();
+            if let Some(sender) = senders.get(i) {
+              sender.send(command).await.ok();
+            }
+          }
         }
       }
     }
@@ -204,212 +170,18 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
 
           tokio::task::spawn(async move {
             target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
           });
         }
 
         receiver
       };
 
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::GetAndTouch(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::GetAndTouch(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Touch(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Touch(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Set(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Set(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Add(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Set(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Replace(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Set(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Append(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Append(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Prepend(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Prepend(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Increment(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Increment(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
-    }
-    connection::Command::Decrement(args, sender) => {
-      let mut receiver = {
-        let (sender, receiver) = mpsc::channel(32);
-
-        for target in senders.iter().cloned() {
-          let sender = sender.clone();
-          let (cmd, receiver) = {
-            let (sender, receiver) = oneshot::channel();
-            (connection::Command::Decrement(args.clone(), sender), receiver)
-          };
-
-          tokio::task::spawn(async move {
-            target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
-          });
-        }
-
-        receiver
-      };
-
-      sender.send(receiver.recv().await.unwrap()).ok();
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
     }
     connection::Command::Delete(args, sender) => {
       let mut receiver = {
@@ -424,16 +196,20 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
 
           tokio::task::spawn(async move {
             target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
           });
         }
 
         receiver
       };
 
-      sender.send(receiver.recv().await.unwrap()).ok();
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
     }
-    connection::Command::Flush(sender) => {
+    connection::Command::GetAndTouch(args, sender) => {
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
@@ -441,21 +217,25 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
-            (connection::Command::Flush(sender), receiver)
+            (connection::Command::GetAndTouch(args.clone(), sender), receiver)
           };
 
           tokio::task::spawn(async move {
             target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
           });
         }
 
         receiver
       };
 
-      sender.send(receiver.recv().await.unwrap()).ok();
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
     }
-    connection::Command::Quit(sender) => {
+    connection::Command::Touch(args, sender) => {
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
@@ -463,21 +243,25 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
-            (connection::Command::Quit(sender), receiver)
+            (connection::Command::Touch(args.clone(), sender), receiver)
           };
 
           tokio::task::spawn(async move {
             target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
           });
         }
 
         receiver
       };
 
-      sender.send(receiver.recv().await.unwrap()).ok();
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
     }
-    connection::Command::Stats(sender) => {
+    connection::Command::Set(args, sender) => {
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
@@ -485,21 +269,25 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
-            (connection::Command::Stats(sender), receiver)
+            (connection::Command::Set(args.clone(), sender), receiver)
           };
 
           tokio::task::spawn(async move {
             target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
           });
         }
 
         receiver
       };
 
-      sender.send(receiver.recv().await.unwrap()).ok();
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
     }
-    connection::Command::Version(sender) => {
+    connection::Command::Add(args, sender) => {
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
@@ -507,21 +295,25 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
-            (connection::Command::Version(sender), receiver)
+            (connection::Command::Set(args.clone(), sender), receiver)
           };
 
           tokio::task::spawn(async move {
             target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
           });
         }
 
         receiver
       };
 
-      sender.send(receiver.recv().await.unwrap()).ok();
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
     }
-    connection::Command::Noop(sender) => {
+    connection::Command::Replace(args, sender) => {
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
@@ -529,19 +321,127 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
-            (connection::Command::Noop(sender), receiver)
+            (connection::Command::Set(args.clone(), sender), receiver)
           };
 
           tokio::task::spawn(async move {
             target.send(cmd).await.ok();
-            sender.send(receiver.await.unwrap()).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
           });
         }
 
         receiver
       };
 
-      sender.send(receiver.recv().await.unwrap()).ok();
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
+    }
+    connection::Command::Append(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Append(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
+          });
+        }
+
+        receiver
+      };
+
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
+    }
+    connection::Command::Prepend(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Prepend(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
+          });
+        }
+
+        receiver
+      };
+
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
+    }
+    connection::Command::Increment(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Increment(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
+          });
+        }
+
+        receiver
+      };
+
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
+    }
+    connection::Command::Decrement(args, sender) => {
+      let mut receiver = {
+        let (sender, receiver) = mpsc::channel(32);
+
+        for target in senders.iter().cloned() {
+          let sender = sender.clone();
+          let (cmd, receiver) = {
+            let (sender, receiver) = oneshot::channel();
+            (connection::Command::Decrement(args.clone(), sender), receiver)
+          };
+
+          tokio::task::spawn(async move {
+            target.send(cmd).await.ok();
+            if let Ok(r) = receiver.await {
+              sender.send(r).await.ok();
+            }
+          });
+        }
+
+        receiver
+      };
+
+      if let Some(r) = receiver.recv().await {
+        sender.send(r).ok();
+      }
     }
   }
 }

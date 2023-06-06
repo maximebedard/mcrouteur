@@ -4,11 +4,11 @@ A memcached proxy similar to mcrouter from facebook. Uses only std & tokio.
 
 Supports:
 
-- [ ] Prefix routing
-- [ ] Broadcast route (Select/Join)
+- [x] Prefix routing
+- [x] Broadcast route (Select/Join)
 - [x] Hash route (CRC32)
 - [ ] Connection pooling
-- [ ] Quiet operations
+- [ ] ~Quiet operations~
 - [ ] Flags
 - [ ] CAS
 - [ ] Fault injection (Error/Latency)
@@ -21,6 +21,7 @@ Implementation notes:
 
 - GET with multiple keys are exploded into multiple GET with a single key
 - GAT with multiple keys are exploded into multiple GAT with a single key
+- VERSION will return the mcrouteur version, not memcached
 - STATS commands will return mcrouter internal stats
 - NOOP is never sent upstream and is used to support GET/GAT with multiple keys
 - FLUSH is not supported
@@ -34,6 +35,9 @@ cargo test --test '*' -- --test-threads=1
 
 # unit tests
 cargo test --lib
+
+# benchmarks
+cargo bench
 ```
 
 # Sample configuration

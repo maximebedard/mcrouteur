@@ -3,18 +3,18 @@ use std::io;
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct KeyCommand {
   pub key: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct TouchCommand {
   pub key: String,
   pub exptime: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct SetCommand {
   pub key: String,
   pub value: Vec<u8>,
@@ -23,13 +23,13 @@ pub struct SetCommand {
   pub cas: Option<u64>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct TextIncrDecrCommand {
   pub key: String,
   pub delta: u64,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct IncrDecrCommand {
   pub key: String,
   pub delta: u64,
@@ -37,7 +37,7 @@ pub struct IncrDecrCommand {
   pub exptime: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct AppendPrependCommand {
   pub key: String,
   pub value: Vec<u8>,
