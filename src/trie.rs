@@ -1,5 +1,3 @@
-// https://en.wikipedia.org/wiki/Radix_tree
-
 #[derive(Debug, PartialEq)]
 pub struct Trie<V> {
   edges: Vec<TrieEdge<V>>,
@@ -47,17 +45,17 @@ impl<V> Trie<V> {
   pub fn find_predecessor(&self, k: impl AsRef<str>) -> Option<&V> {
     fn find_predecessor_recursive<'a, V>(
       k: &str,
-      edges: &'a Vec<TrieEdge<V>>,
+      edges: &'a [TrieEdge<V>],
       parent: Option<&'a TrieNode<V>>,
     ) -> Option<&'a TrieNode<V>> {
       match edges.iter().find(|e| k.starts_with(e.k.as_str())) {
         Some(TrieEdge { k: prefix, node, .. }) => {
-          find_predecessor_recursive(&k[prefix.len()..], &node.edges, Some(&node))
+          find_predecessor_recursive(&k[prefix.len()..], &node.edges, Some(node))
         }
         None => parent,
       }
     }
-    find_predecessor_recursive(k.as_ref(), &self.edges, None).and_then(|node| node.v.as_ref())
+    find_predecessor_recursive(k.as_ref(), self.edges.as_slice(), None).and_then(|node| node.v.as_ref())
   }
 
   pub fn insert(&mut self, k: impl AsRef<str>, v: V) -> Option<V> {

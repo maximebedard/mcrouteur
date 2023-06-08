@@ -26,6 +26,12 @@ pub enum ServerError {
   InvalidArguments,
   ItemNotStored,
   IncrDecrOnNonNumericValue,
+  UnknownCommand,
+  OutOfMemory,
+  NotSupported,
+  InternalError,
+  Busy,
+  TemporaryFailure,
   Unknown(u16),
 }
 
@@ -38,23 +44,14 @@ impl ServerError {
       Self::InvalidArguments => 0x0004,
       Self::ItemNotStored => 0x0005,
       Self::IncrDecrOnNonNumericValue => 0x0006,
+      Self::UnknownCommand => 0x0081,
+      Self::OutOfMemory => 0x0082,
+      Self::NotSupported => 0x0083,
+      Self::InternalError => 0x0084,
+      Self::Busy => 0x0085,
+      Self::TemporaryFailure => 0x0086,
       Self::Unknown(code) => *code,
     }
-    // 0x0001 	Key not found
-    // 0x0002 	Key exists
-    // 0x0003 	Value too large
-    // 0x0004 	Invalid arguments
-    // 0x0005 	Item not stored
-    // 0x0006 	Incr/Decr on non-numeric value.
-    // 0x0007 	The vbucket belongs to another server
-    // 0x0008 	Authentication error
-    // 0x0009 	Authentication continue
-    // 0x0081 	Unknown command
-    // 0x0082 	Out of memory
-    // 0x0083 	Not supported
-    // 0x0084 	Internal error
-    // 0x0085 	Busy
-    // 0x0086 	Temporary failure
   }
 }
 
@@ -66,7 +63,13 @@ impl fmt::Display for ServerError {
       ServerError::ValueTooLarge => write!(f, "value too large"),
       ServerError::InvalidArguments => write!(f, "invalid arguments"),
       ServerError::ItemNotStored => write!(f, "item not stored"),
-      ServerError::IncrDecrOnNonNumericValue => todo!(),
+      ServerError::IncrDecrOnNonNumericValue => write!(f, "incr/decr on non-numeric value"),
+      ServerError::UnknownCommand => write!(f, "unknown command"),
+      ServerError::OutOfMemory => write!(f, "out of memory"),
+      ServerError::NotSupported => write!(f, "not supported"),
+      ServerError::InternalError => write!(f, "internal error"),
+      ServerError::Busy => write!(f, "busy"),
+      ServerError::TemporaryFailure => todo!(),
       ServerError::Unknown(code) => write!(f, "unknown error code {code}"),
     }
   }
@@ -96,6 +99,12 @@ impl From<ServerError> for Error {
 impl From<io::Error> for Error {
   fn from(value: io::Error) -> Self {
     Self::Io(value)
+  }
+}
+
+impl From<oneshot::error::RecvError> for Error {
+  fn from(_value: oneshot::error::RecvError) -> Self {
+    Self::Io(io::Error::new(io::ErrorKind::Interrupted, "interrupted"))
   }
 }
 
@@ -156,46 +165,111 @@ impl Command {
   }
 }
 
-pub fn spawn_connection(mut receiver: mpsc::Receiver<Command>, url: Url) -> JoinHandle<()> {
+impl fmt::Debug for Command {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Get(args, _) => f.debug_tuple("Get").field(args).finish(),
+      Self::Delete(args, _) => f.debug_tuple("Delete").field(args).finish(),
+      Self::GetAndTouch(args, _) => f.debug_tuple("GetAndTouch").field(args).finish(),
+      Self::Touch(args, _) => f.debug_tuple("Touch").field(args).finish(),
+      Self::Set(args, _) => f.debug_tuple("Set").field(args).finish(),
+      Self::Add(args, _) => f.debug_tuple("Add").field(args).finish(),
+      Self::Replace(args, _) => f.debug_tuple("Replace").field(args).finish(),
+      Self::Append(args, _) => f.debug_tuple("Append").field(args).finish(),
+      Self::Prepend(args, _) => f.debug_tuple("Prepend").field(args).finish(),
+      Self::Increment(args, _) => f.debug_tuple("Increment").field(args).finish(),
+      Self::Decrement(args, _) => f.debug_tuple("Decrement").field(args).finish(),
+    }
+  }
+}
+
+pub fn spawn_connection(url: Url) -> (mpsc::Sender<Command>, JoinHandle<()>) {
   let params = url.query_pairs().collect::<BTreeMap<_, _>>();
 
-  let max_idle_duration = params
-    .get("max_idle")
-    .and_then(|v| v.parse().ok().map(Duration::from_secs))
-    .unwrap_or(Duration::from_secs(30 * 60));
-  let max_age_duration = params
-    .get("max_age")
-    .and_then(|v| v.parse().ok().map(Duration::from_secs))
-    .unwrap_or(Duration::from_secs(30 * 60));
+  let pool_size = params.get("pool_size").and_then(|v| v.parse::<usize>().ok());
 
-  tokio::task::spawn(async move {
-    while let Some(command) = receiver.recv().await {
-      let mut connection = Connection::connect(url.clone()).await.unwrap();
-      handle_command(&mut connection, command).await;
+  fn spawn(url: Url) -> (mpsc::Sender<Command>, JoinHandle<()>) {
+    let params = url.query_pairs().collect::<BTreeMap<_, _>>();
 
-      let idle_deadline = tokio::time::sleep(max_idle_duration);
-      tokio::pin!(idle_deadline);
+    let max_idle_duration = params
+      .get("max_idle")
+      .and_then(|v| v.parse().ok().map(Duration::from_secs))
+      .unwrap_or(Duration::from_secs(30 * 60));
 
-      let age_deadline = tokio::time::sleep(max_age_duration);
-      tokio::pin!(age_deadline);
+    let max_age_duration = params
+      .get("max_age")
+      .and_then(|v| v.parse().ok().map(Duration::from_secs))
+      .unwrap_or(Duration::from_secs(30 * 60));
 
-      loop {
-        tokio::select! {
-          _ = &mut idle_deadline => break,
-          _ = &mut age_deadline => break,
-          command = receiver.recv() => match command {
-            Some(command) => {
-              idle_deadline.as_mut().reset(Instant::now() + max_idle_duration);
-              handle_command(&mut connection, command).await
+    let (sender, mut receiver) = mpsc::channel(32);
+
+    let handle = tokio::task::spawn(async move {
+      while let Some(command) = receiver.recv().await {
+        let mut connection = Connection::connect(&url).await.unwrap();
+        handle_command(&mut connection, command).await;
+
+        let idle_deadline = tokio::time::sleep(max_idle_duration);
+        tokio::pin!(idle_deadline);
+
+        let age_deadline = tokio::time::sleep(max_age_duration);
+        tokio::pin!(age_deadline);
+
+        loop {
+          tokio::select! {
+            _ = &mut idle_deadline => break,
+            _ = &mut age_deadline => break,
+            command = receiver.recv() => match command {
+              Some(command) => {
+                idle_deadline.as_mut().reset(Instant::now() + max_idle_duration);
+                handle_command(&mut connection, command).await
+              },
+              None => break,
             },
-            None => break,
-          },
+          }
+        }
+
+        connection.close().await.unwrap();
+      }
+    });
+
+    (sender, handle)
+  }
+
+  fn spawn_pool(url: Url, pool_size: usize) -> (mpsc::Sender<Command>, JoinHandle<()>) {
+    let (sender, mut receiver) = mpsc::channel::<Command>(32);
+
+    let handle = tokio::task::spawn(async move {
+      let mut connections = vec![];
+      for _ in 0..pool_size {
+        connections.push(spawn(url.clone()));
+      }
+
+      let mut i = 0;
+      while let Some(command) = receiver.recv().await {
+        println!("{:?}", command);
+        if let Err(_err) = connections[i].0.send(command).await {
+          todo!()
+        }
+
+        if i < connections.len() - 1 {
+          i += 1;
+        } else {
+          i = 0;
         }
       }
 
-      connection.close().await.unwrap();
-    }
-  })
+      for (_, handle) in connections {
+        handle.await.unwrap()
+      }
+    });
+
+    (sender, handle)
+  }
+
+  match pool_size {
+    Some(pool_size) if pool_size > 1 => spawn_pool(url, pool_size),
+    _ => spawn(url),
+  }
 }
 
 async fn handle_command(connection: &mut Connection, command: Command) {
@@ -213,37 +287,39 @@ async fn handle_command(connection: &mut Connection, command: Command) {
       SetCommand {
         key,
         value,
-        flags: _,
+        flags,
         exptime,
         cas,
       },
       sender,
     ) => {
-      sender.send(connection.set(key, value, exptime, cas).await).ok();
+      sender.send(connection.set(key, value, flags, exptime, cas).await).ok();
     }
     Command::Add(
       SetCommand {
         key,
         value,
-        flags: _,
+        flags,
         exptime,
         cas,
       },
       sender,
     ) => {
-      sender.send(connection.add(key, value, exptime, cas).await).ok();
+      sender.send(connection.add(key, value, flags, exptime, cas).await).ok();
     }
     Command::Replace(
       SetCommand {
         key,
         value,
-        flags: _,
+        flags,
         exptime,
         cas,
       },
       sender,
     ) => {
-      sender.send(connection.replace(key, value, exptime, cas).await).ok();
+      sender
+        .send(connection.replace(key, value, flags, exptime, cas).await)
+        .ok();
     }
 
     Command::Append(AppendPrependCommand { key, value }, sender) => {
@@ -287,7 +363,7 @@ pub struct Connection {
 }
 
 impl Connection {
-  pub async fn connect(url: Url) -> Result<Self> {
+  pub async fn connect(url: &Url) -> Result<Self> {
     assert_eq!("tcp", url.scheme()); // only support tcp for now
 
     let port = url.port().unwrap_or(11211);
@@ -305,10 +381,24 @@ impl Connection {
       None => format!("[::]:{port}").parse().unwrap(),
     };
 
-    let stream = TcpStream::connect(addr).await?;
-    let stream = BufStream::new(stream);
+    let stream = TcpStream::connect(addr).await.map(BufStream::new)?;
 
     Ok(Self { stream })
+  }
+
+  pub async fn connect_with_exponential_backoff(url: &Url, mut d: Duration, max_retries: usize) -> Result<Self> {
+    let mut retries = 0;
+    loop {
+      match Self::connect(&url).await {
+        r @ Ok(_) => return r,
+        Err(Error::Io(err)) if err.kind() == io::ErrorKind::ConnectionRefused && retries < max_retries => {
+          tokio::time::sleep(d).await;
+          d = 2 * d;
+          retries += 1;
+        }
+        r @ Err(_) => return r,
+      }
+    }
   }
 
   pub async fn close(mut self) -> Result<()> {
@@ -344,21 +434,25 @@ impl Connection {
     &mut self,
     key: impl AsRef<str>,
     value: impl AsRef<[u8]>,
+    flags: u32,
     exptime: u32,
     cas: Option<u64>,
   ) -> Result<()> {
-    self.set_command(0x01, key.as_ref(), value.as_ref(), exptime, cas).await
+    self
+      .set_command(0x01, key.as_ref(), value.as_ref(), flags, exptime, cas)
+      .await
   }
 
   pub async fn setq(
     &mut self,
     key: impl AsRef<str>,
     value: impl AsRef<[u8]>,
+    flags: u32,
     exptime: u32,
     cas: Option<u64>,
   ) -> io::Result<()> {
     self
-      .set_command_quiet(0x11, key.as_ref(), value.as_ref(), exptime, cas)
+      .set_command_quiet(0x11, key.as_ref(), value.as_ref(), flags, exptime, cas)
       .await
   }
 
@@ -366,21 +460,25 @@ impl Connection {
     &mut self,
     key: impl AsRef<str>,
     value: impl AsRef<[u8]>,
+    flags: u32,
     exptime: u32,
     cas: Option<u64>,
   ) -> Result<()> {
-    self.set_command(0x02, key.as_ref(), value.as_ref(), exptime, cas).await
+    self
+      .set_command(0x02, key.as_ref(), value.as_ref(), flags, exptime, cas)
+      .await
   }
 
   pub async fn addq(
     &mut self,
     key: impl AsRef<str>,
     value: impl AsRef<[u8]>,
+    flags: u32,
     exptime: u32,
     cas: Option<u64>,
   ) -> io::Result<()> {
     self
-      .set_command_quiet(0x12, key.as_ref(), value.as_ref(), exptime, cas)
+      .set_command_quiet(0x12, key.as_ref(), value.as_ref(), flags, exptime, cas)
       .await
   }
 
@@ -388,26 +486,38 @@ impl Connection {
     &mut self,
     key: impl AsRef<str>,
     value: impl AsRef<[u8]>,
+    flags: u32,
     exptime: u32,
     cas: Option<u64>,
   ) -> Result<()> {
-    self.set_command(0x03, key.as_ref(), value.as_ref(), exptime, cas).await
+    self
+      .set_command(0x03, key.as_ref(), value.as_ref(), flags, exptime, cas)
+      .await
   }
 
   pub async fn replaceq(
     &mut self,
     key: impl AsRef<str>,
     value: impl AsRef<[u8]>,
+    flags: u32,
     exptime: u32,
     cas: Option<u64>,
   ) -> io::Result<()> {
     self
-      .set_command_quiet(0x13, key.as_ref(), value.as_ref(), exptime, cas)
+      .set_command_quiet(0x13, key.as_ref(), value.as_ref(), flags, exptime, cas)
       .await
   }
 
-  async fn set_command(&mut self, op: u8, key: &str, value: &[u8], exptime: u32, cas: Option<u64>) -> Result<()> {
-    self.write_set_command(op, key, value, exptime, cas).await?;
+  async fn set_command(
+    &mut self,
+    op: u8,
+    key: &str,
+    value: &[u8],
+    flags: u32,
+    exptime: u32,
+    cas: Option<u64>,
+  ) -> Result<()> {
+    self.write_set_command(op, key, value, flags, exptime, cas).await?;
     self.stream.flush().await?;
     self.read_empty_response().await
   }
@@ -417,10 +527,11 @@ impl Connection {
     op: u8,
     key: &str,
     value: &[u8],
+    flags: u32,
     exptime: u32,
     cas: Option<u64>,
   ) -> io::Result<()> {
-    self.write_set_command(op, key, value, exptime, cas).await?;
+    self.write_set_command(op, key, value, flags, exptime, cas).await?;
     self.stream.flush().await
   }
 
@@ -594,6 +705,7 @@ impl Connection {
     op: u8,
     key: &str,
     value: &[u8],
+    flags: u32,
     exptime: u32,
     _cas: Option<u64>,
   ) -> io::Result<()> {
@@ -609,7 +721,7 @@ impl Connection {
         ..Header::request()
       })
       .await?;
-    self.stream.write_u32(0x00).await?;
+    self.stream.write_u32(flags).await?;
     self.stream.write_u32(exptime).await?;
     self.stream.write_all(key.as_bytes()).await?;
     self.stream.write_all(value).await?;

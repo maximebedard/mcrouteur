@@ -61,8 +61,7 @@ async fn main() -> io::Result<()> {
   }
   eprintln!("Listening on {bind_url}...");
 
-  let (sender, receiver) = mpsc::channel(32);
-  router::spawn_router(router_configuration, receiver);
+  let (sender, _handle) = router::spawn_router(router_configuration);
 
   let interrupt = tokio::signal::ctrl_c();
   tokio::pin!(interrupt);
@@ -98,6 +97,8 @@ async fn main() -> io::Result<()> {
     _ => unimplemented!(),
   };
 
+  eprintln!("Shutting down...");
+
   Ok(())
 }
 
@@ -113,8 +114,10 @@ async fn handle_stream(
         _ = &mut interrupt => break,
         r = codec::read_command(&mut stream) => match r {
           Ok(command) => {
-            proxy::proxy_command(&mut stream, &mut client, command).await.unwrap();
-            stream.flush().await.unwrap();
+            match proxy::proxy_command(&mut stream, &mut client, command).await {
+              Ok(()) => {},
+              Err(err) => eprintln!("{:?}", err),
+            }
           },
           Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
           Err(err) => eprintln!("{:?}", err),

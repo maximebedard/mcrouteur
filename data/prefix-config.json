@@ -17,6 +17,5 @@
       "type": "proxy",
       "upstream": "c"
     }
-  },
-  "wildcard_route": null
+  }
 }

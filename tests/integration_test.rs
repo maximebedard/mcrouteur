@@ -10,7 +10,9 @@ use tokio::{
 
 #[tokio::test]
 async fn test_binary_protocol() {
-  let mut conn = Connection::connect("tcp://[::]:11211".parse().unwrap()).await.unwrap();
+  let mut conn = Connection::connect(&("tcp://[::]:11211".parse().unwrap()))
+    .await
+    .unwrap();
   conn.flush().await.unwrap();
   assert_eq!("1.6.19", conn.version().await.unwrap());
   test_binary_commands(&mut conn).await;
@@ -30,15 +32,14 @@ async fn test_text_protocol() {
 // #[ignore]
 async fn test_mcrouteur_proxy_configuration() {
   let _command = Command::new(env!("CARGO_BIN_EXE_mcrouteur"))
-    .args(&[
+    .args([
       "--bind-url",
       "tcp://localhost:11210",
       "--config",
       r#"{
         "upstreams": {
-          "primary": "tcp://[::]:11211"
+          "primary": "tcp://[::]:11211?pool_size=3"
         },
-        "routes":{},
         "wildcard_route":{
           "type": "proxy",
           "upstream": "primary"
@@ -49,19 +50,28 @@ async fn test_mcrouteur_proxy_configuration() {
     .spawn()
     .unwrap();
 
-  tokio::time::sleep(Duration::from_millis(1000)).await;
+  let mut upstream_conn = Connection::connect(&("tcp://[::]:11211".parse().unwrap()))
+    .await
+    .unwrap();
 
-  let mut upstream_conn = Connection::connect("tcp://[::]:11211".parse().unwrap()).await.unwrap();
+  let mut binary_conn =
+    Connection::connect_with_exponential_backoff(&("tcp://[::]:11210".parse().unwrap()), Duration::from_millis(100), 5)
+      .await
+      .unwrap();
 
   upstream_conn.flush().await.unwrap();
-  let mut conn = Connection::connect("tcp://[::]:11210".parse().unwrap()).await.unwrap();
-  test_binary_commands(&mut conn).await;
-  conn.close().await.unwrap();
+  test_binary_commands(&mut binary_conn).await;
+  upstream_conn.flush().await.unwrap();
+  test_binary_quiet_commands(&mut binary_conn).await;
+
+  binary_conn.close().await.unwrap();
+
+  let mut text_conn = TcpStream::connect("[::]:11210").await.map(BufStream::new).unwrap();
 
   upstream_conn.flush().await.unwrap();
-  let mut conn = TcpStream::connect("[::]:11210").await.map(BufStream::new).unwrap();
-  test_text_commands(&mut conn).await;
-  conn.shutdown().await.unwrap();
+  test_text_commands(&mut text_conn).await;
+
+  text_conn.shutdown().await.unwrap();
 
   upstream_conn.close().await.unwrap();
 }
@@ -69,7 +79,7 @@ async fn test_mcrouteur_proxy_configuration() {
 #[tokio::test]
 async fn test_mcrouter_prefix_routes() {
   let _command = Command::new(env!("CARGO_BIN_EXE_mcrouteur"))
-    .args(&[
+    .args([
       "--bind-url",
       "tcp://localhost:11210",
       "--config",
@@ -80,37 +90,34 @@ async fn test_mcrouter_prefix_routes() {
           "c": "tcp://[::]:11213"
         },
         "routes": {
-          "a:": {
-            "type": "proxy",
-            "upstream": "a"
-          },
-          "b:": {
-            "type": "proxy",
-            "upstream": "b"
-          },
-          "c:": {
-            "type": "proxy",
-            "upstream": "c"
-          }
-        },
-        "wildcard_route": null
+          "a:": {"type": "proxy", "upstream": "a"},
+          "b:": {"type": "proxy", "upstream": "b"},
+          "c:": {"type": "proxy", "upstream": "c"}
+        }
       }"#,
     ])
     .kill_on_drop(true)
     .spawn()
     .unwrap();
 
-  tokio::time::sleep(Duration::from_millis(1000)).await;
+  let mut proxy =
+    Connection::connect_with_exponential_backoff(&("tcp://[::]:11210".parse().unwrap()), Duration::from_millis(100), 5)
+      .await
+      .unwrap();
 
-  let mut proxy = Connection::connect("tcp://[::]:11210".parse().unwrap()).await.unwrap();
-
-  let mut a = Connection::connect("tcp://[::]:11211".parse().unwrap()).await.unwrap();
-  let mut b = Connection::connect("tcp://[::]:11212".parse().unwrap()).await.unwrap();
-  let mut c = Connection::connect("tcp://[::]:11213".parse().unwrap()).await.unwrap();
+  let mut a = Connection::connect(&("tcp://[::]:11211".parse().unwrap()))
+    .await
+    .unwrap();
+  let mut b = Connection::connect(&("tcp://[::]:11212".parse().unwrap()))
+    .await
+    .unwrap();
+  let mut c = Connection::connect(&("tcp://[::]:11213".parse().unwrap()))
+    .await
+    .unwrap();
 
   tokio::try_join!(a.flush(), b.flush(), c.flush()).unwrap();
 
-  proxy.set("a:foo", "toto", 0, None).await.unwrap();
+  proxy.set("a:foo", "toto", 0, 0, None).await.unwrap();
   assert_eq!(b"toto", a.get("a:foo").await.unwrap().chunk());
   assert_eq!(
     Some(ServerError::KeyNotFound),
@@ -121,7 +128,7 @@ async fn test_mcrouter_prefix_routes() {
     c.get("a:foo").await.unwrap_err().as_server_error()
   );
 
-  proxy.set("b:foo", "titi", 0, None).await.unwrap();
+  proxy.set("b:foo", "titi", 0, 0, None).await.unwrap();
   assert_eq!(
     Some(ServerError::KeyNotFound),
     a.get("b:foo").await.unwrap_err().as_server_error()
@@ -132,7 +139,7 @@ async fn test_mcrouter_prefix_routes() {
     c.get("b:foo").await.unwrap_err().as_server_error()
   );
 
-  proxy.set("c:foo", "tata", 0, None).await.unwrap();
+  proxy.set("c:foo", "tata", 0, 0, None).await.unwrap();
   assert_eq!(
     Some(ServerError::KeyNotFound),
     a.get("c:foo").await.unwrap_err().as_server_error()
@@ -147,16 +154,16 @@ async fn test_mcrouter_prefix_routes() {
 }
 
 async fn test_binary_commands(conn: &mut Connection) {
-  conn.set("foo", b"bar", 0, None).await.unwrap();
+  conn.set("foo", b"bar", 0, 0, None).await.unwrap();
   assert_eq!(b"bar", conn.get("foo").await.unwrap().chunk());
 
-  conn.set("bar", b"baz", 0, None).await.unwrap();
+  conn.set("bar", b"baz", 0, 0, None).await.unwrap();
   assert_eq!(b"baz", conn.get("bar").await.unwrap().chunk());
 
-  conn.set("toto", b"tata", 0, None).await.unwrap();
+  conn.set("toto", b"tata", 0, 0, None).await.unwrap();
   assert_eq!(b"tata", conn.get("toto").await.unwrap().chunk());
 
-  conn.set("empty", b"", 0, None).await.unwrap();
+  conn.set("empty", b"", 0, 0, None).await.unwrap();
   assert_eq!(b"", conn.get("empty").await.unwrap().chunk());
 
   assert_eq!(
@@ -166,22 +173,22 @@ async fn test_binary_commands(conn: &mut Connection) {
 
   assert_eq!(
     Some(ServerError::KeyExists),
-    conn.add("foo", b"baz", 0, None).await.unwrap_err().as_server_error()
+    conn.add("foo", b"baz", 0, 0, None).await.unwrap_err().as_server_error()
   );
 
-  conn.add("zoo", "pet", 0, None).await.unwrap();
+  conn.add("zoo", "pet", 0, 0, None).await.unwrap();
   assert_eq!(b"pet", conn.get("zoo").await.unwrap().chunk());
 
   assert_eq!(
     Some(ServerError::KeyNotFound),
     conn
-      .replace("missing", b"baz", 0, None)
+      .replace("missing", b"baz", 0, 0, None)
       .await
       .unwrap_err()
       .as_server_error()
   );
 
-  conn.replace("foo", b"baz", 0, None).await.unwrap();
+  conn.replace("foo", b"baz", 0, 0, None).await.unwrap();
   assert_eq!(b"baz", conn.get("foo").await.unwrap().chunk());
 
   conn.delete("toto").await.unwrap();
@@ -192,6 +199,14 @@ async fn test_binary_commands(conn: &mut Connection) {
 
   conn.touch("foo", 1).await.unwrap();
   assert_eq!(b"baz", conn.gat("bar", 1).await.unwrap().chunk());
+}
+
+async fn test_binary_quiet_commands(conn: &mut Connection) {
+  conn.setq("foo", b"bar", 0, 0, None).await.unwrap();
+  assert_eq!(b"bar", conn.get("foo").await.unwrap().chunk());
+
+  conn.addq("foo", b"baz", 0, 0, None).await.unwrap();
+  assert_eq!(b"bar", conn.get("foo").await.unwrap().chunk());
 }
 
 async fn text_flush(s: &mut BufStream<TcpStream>) {

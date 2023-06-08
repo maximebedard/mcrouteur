@@ -14,8 +14,13 @@ use crate::{
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct RouterConfiguration {
+  #[serde(default)]
   upstreams: BTreeMap<String, Url>,
+
+  #[serde(default)]
   routes: BTreeMap<String, RouteConfiguration>,
+
+  #[serde(default)]
   wildcard_route: Option<RouteConfiguration>,
 }
 
@@ -25,6 +30,9 @@ pub enum RouteConfiguration {
   BroadcastSelect {
     upstreams: Vec<String>,
   },
+  // BroadcastJoin {
+  //   upstreams: Vec<String>,
+  // },
   Random {
     upstreams: Vec<String>,
   },
@@ -66,18 +74,14 @@ struct Router {
   wildcard_route: Option<Route>,
 }
 
-pub fn spawn_router(
-  config: Option<RouterConfiguration>,
-  mut receiver: mpsc::Receiver<connection::Command>,
-) -> JoinHandle<()> {
+pub fn spawn_router(config: Option<RouterConfiguration>) -> (mpsc::Sender<connection::Command>, JoinHandle<()>) {
   let router = config
     .map(|config| {
       let upstreams = config
         .upstreams
         .into_iter()
         .map(|(name, url)| {
-          let (sender, receiver) = mpsc::channel(32);
-          spawn_connection(receiver, url);
+          let (sender, _handle) = spawn_connection(url);
           (name, sender)
         })
         .collect::<BTreeMap<_, _>>();
@@ -122,19 +126,29 @@ pub fn spawn_router(
     })
     .unwrap_or_default();
 
-  tokio::task::spawn(async move {
+  let (sender, mut receiver) = mpsc::channel::<connection::Command>(32);
+
+  let handle = tokio::task::spawn(async move {
     while let Some(command) = receiver.recv().await {
       let key = command.key();
       if let Some(route) = router.routes.find_predecessor(key).or(router.wildcard_route.as_ref()) {
         match route {
           Route::Proxy { sender } => {
-            sender.send(command).await.ok();
+            let sender = sender.clone();
+            tokio::task::spawn(async move {
+              sender.send(command).await.ok();
+            });
           }
-          Route::BroadcastSelect { senders } => broadcast(command, senders).await,
+          Route::BroadcastSelect { senders } => {
+            tokio::task::spawn(broadcast(command, senders.clone()));
+          }
           Route::Random { senders } => {
             let i = rand::random::<usize>() % senders.len();
             if let Some(sender) = senders.get(i) {
-              sender.send(command).await.ok();
+              let sender = sender.clone();
+              tokio::task::spawn(async move {
+                sender.send(command).await.ok();
+              });
             }
           }
           Route::Hash { algorithm, senders } => {
@@ -146,22 +160,27 @@ pub fn spawn_router(
             };
             let i = checksum % senders.len();
             if let Some(sender) = senders.get(i) {
-              sender.send(command).await.ok();
+              let sender = sender.clone();
+              tokio::task::spawn(async move {
+                sender.send(command).await.ok();
+              });
             }
           }
         }
       }
     }
-  })
+  });
+
+  (sender, handle)
 }
 
-async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<connection::Command>>) {
+async fn broadcast(command: connection::Command, senders: Vec<mpsc::Sender<connection::Command>>) {
   match command {
     connection::Command::Get(args, sender) => {
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -187,7 +206,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -213,7 +232,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -239,7 +258,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -265,7 +284,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -291,7 +310,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -317,7 +336,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -343,7 +362,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -369,7 +388,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -395,7 +414,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();
@@ -421,7 +440,7 @@ async fn broadcast(command: connection::Command, senders: &Vec<mpsc::Sender<conn
       let mut receiver = {
         let (sender, receiver) = mpsc::channel(32);
 
-        for target in senders.iter().cloned() {
+        for target in senders {
           let sender = sender.clone();
           let (cmd, receiver) = {
             let (sender, receiver) = oneshot::channel();

@@ -1,19 +1,20 @@
 # mcrouteur
 
-A memcached proxy similar to mcrouter from facebook. Uses only std & tokio.
+A memcached proxy similar to mcrouter from facebook. Built for fun.
 
 Supports:
 
 - [x] Prefix routing
 - [x] Broadcast route (Select/Join)
 - [x] Hash route (CRC32)
-- [ ] Connection pooling
-- [ ] ~Quiet operations~
-- [ ] Flags
+- [x] Connection pooling (simple round-robin)
+- [ ] Quiet operations
+  - [x] SetQ/AddQ/ReplaceQ/AppendQ/PrependQ
+  - [ ] Pipelining (GetQ/GatQ/Noop)
+- [x] Flags
 - [ ] CAS
 - [ ] Fault injection (Error/Latency)
-- [ ] Key rewrite
-- [ ] Expiration rewrite
+- [ ] Rewrite (Key/Expiration)
 - [x] Text protocol (Downstream)
 - [x] Binary protocol (Upstream & Downstream)
 
@@ -23,7 +24,7 @@ Implementation notes:
 - GAT with multiple keys are exploded into multiple GAT with a single key
 - VERSION will return the mcrouteur version, not memcached
 - STATS commands will return mcrouter internal stats
-- NOOP is never sent upstream and is used to support GET/GAT with multiple keys
+- NOOP is not supported (will eventually be used to support pipelining)
 - FLUSH is not supported
 - QUIT is not supported
 
@@ -40,7 +41,9 @@ cargo test --lib
 cargo bench
 ```
 
-# Sample configuration
+# Configuration examples
+
+Multiple upstreams with prefixed routes
 
 ```json
 {
@@ -50,10 +53,11 @@ cargo bench
     "c": "tcp://[::]:11212"
   },
   "routes": {
-    "/a/": { "type": "<type>", .. },
-    "/b/": { "type": "<type>", .. }
+    "/a/": { "type": "proxy", "upstream": "a" },
+    "/b/": { "type": "proxy", "upstream": "b" },
+    "/c/": { "type": "proxy", "upstream": "c" }
   },
-  "wildcard_route": {"type": "<type>", ..}
+  "wildcard_route": { "type": "proxy", "upstream": "a" }
 }
 ```
 
@@ -62,7 +66,6 @@ Proxy configuration
 ```json
 {
   "upstreams": { "primary": "tcp://[::]:11211" },
-  "routes": {},
   "wildcard_route": { "type": "proxy", "upstream": "primary" }
 }
 ```
